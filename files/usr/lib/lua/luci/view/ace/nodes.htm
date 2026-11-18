@@ -111,7 +111,7 @@ function aceFlag(iso) {
 	if (!iso || iso.length !== 2) return '🌐';
 	var a = iso.toUpperCase().charCodeAt(0), b = iso.toUpperCase().charCodeAt(1);
 	if (a < 65 || a > 90 || b < 65 || b > 90) return '🌐';
-	return String.fromCodePoint(127397 + a - 65, 127397 + b - 65);
+	return String.fromCodePoint(127462 + a - 65, 127462 + b - 65);
 }
 
 function aceFilter(m) {

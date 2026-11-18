@@ -370,15 +370,34 @@ end
 
 function api_log()
 	-- 读接口顺手做日志限额：超限就保留尾部并截断，防止 tmpfs 被写满
-	for _, f in ipairs({ "/var/log/ace.log", "/var/log/ace-watchdog.log" }) do
+	for _, f in ipairs({ "/var/log/ace.log", "/var/log/ace-watchdog.log", "/etc/ace/ace.log" }) do
 		local st = fs.stat(f)
 		if st and (st.size or 0) > LOG_MAX then
 			sys.call("{ tail -c 262144 '" .. f .. "' > '" .. f .. ".t' && mv '" .. f .. ".t' '" .. f .. "'; } 2>/dev/null")
 		end
 	end
-	local body = sys.exec("tail -n 300 /var/log/ace.log 2>/dev/null")
+
+	-- 日志分两个来源，都要给；顺序上引擎在前、服务事件在后 —— 面板会自动滚到底部，
+	-- 带日期的服务事件（隧道就绪 / 加 zone / 看门狗）落在可视区里更有用。
+	--   服务事件：init.d 里 logger -t ace 写的，只在 logread
+	--   引擎输出：run.sh 把引擎 stdout 重定向到 /var/log/ace.log；引擎自身另有 /etc/ace/ace.log
+	-- 之前只读 /var/log/ace.log —— 引擎在守护模式下几乎不写 stdout，面板长期显示「暂无日志」。
+	local parts = {}
+	local eng = sys.exec("tail -n 200 /var/log/ace.log 2>/dev/null")
+	if not eng or eng:gsub("%s", "") == "" then
+		eng = sys.exec("tail -n 200 /etc/ace/ace.log 2>/dev/null")
+	end
+	if eng and eng:gsub("%s", "") ~= "" then
+		parts[#parts + 1] = "── 引擎 ──\n" .. eng
+	end
+	local svc = sys.exec("logread -e 'ace:' 2>/dev/null | tail -n 60 | sed 's/^\\(.*\\) user\\.[a-z]* ace: /\\1 /'")
+	if svc and svc:gsub("%s", "") ~= "" then
+		parts[#parts + 1] = "── 服务事件 ──\n" .. svc
+	end
+
+	local body = table.concat(parts, "\n")
 	http.prepare_content("text/plain; charset=utf-8")
-	http.write(body or "")
+	http.write(body ~= "" and body or "（暂无日志）\n")
 end
 
 -- ---------------------------------------------------------------- 设置读写
