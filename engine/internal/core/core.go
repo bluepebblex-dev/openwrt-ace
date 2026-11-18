@@ -4,7 +4,7 @@
 //
 // The package is transport-agnostic: it takes a complete mihomo config.yaml as
 // bytes and does not know about WARP, WireGuard, AmneziaWG or MASQUE. The
-// caller (package main) renders those proxies from warpscout's engine.
+// caller (package main) renders those proxies from ace's engine.
 package core
 
 import (
@@ -24,8 +24,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/filelock"
-	"github.com/xhwarp/warp-client/internal/fsowner"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/filelock"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/fsowner"
 )
 
 // Defaults for the managed config, matching what every Clash GUI client uses.

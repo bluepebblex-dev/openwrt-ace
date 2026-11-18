@@ -37,10 +37,11 @@ is_on() { [ "$(cfg_get "$1")" = "1" ]; }
 # mkdir 要么成功要么不存在,天然互斥;锁目录里记持有者 pid,进程崩了可识别过期锁。
 take_lock() {
 	local tries=50 pid
-	# 过期锁:持有者已死(/proc/<pid> 没了)就清掉抢,避免一次崩溃锁死服务
+	# 过期锁:持有者已死(/proc/<pid> 没了)、或目录里根本没写上 pid(写 pid 前
+	# 崩溃,这种锁永远等不到过期),都直接清掉重抢,避免一次崩溃锁死服务
 	while [ -d "$ACE_LOCK" ]; do
 		pid=$(cat "$ACE_LOCK/pid" 2>/dev/null)
-		if [ -n "$pid" ] && [ ! -d "/proc/$pid" ]; then
+		if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
 			rm -f "$ACE_LOCK/pid" 2>/dev/null
 			rmdir "$ACE_LOCK" 2>/dev/null
 			continue
@@ -137,17 +138,14 @@ fw_zone_add() {
 
 fw_zone_del() {
 	uci -q get firewall.ace >/dev/null 2>&1 || return 0
-	uci delete firewall.ace
-	# 删掉指向 ace 的 forwarding，只动我们自己加的那条
-	local i=0 n
-	n=$(uci show firewall 2>/dev/null | grep -c '^firewall\.@forwarding\[')
-	while [ "$i" -lt "$n" ]; do
-		if [ "$(uci -q get firewall.@forwarding[$i].dest)" = "ace" ]; then
-			uci delete "firewall.@forwarding[$i]" 2>/dev/null
-			break
-		fi
-		i=$((i + 1))
+	# 收集全部指向 ace 的 forwarding 后逆序删除。之前只删第一个就 break，
+	# 历史残留会让 fw4 加载报 "references unknown destination"，最坏连累
+	# 整份防火墙（含 WAN）加载失败。
+	local idx
+	for idx in $(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\(@forwarding\[[0-9]*\]\)=forwarding$/\1/p"); do
+		[ "$(uci -q get "firewall.$idx.dest")" = "ace" ] && uci -q delete "firewall.$idx"
 	done
+	uci delete firewall.ace
 	uci commit firewall
 	/etc/init.d/firewall reload >/dev/null 2>&1
 	logger -t ace "已移除防火墙 zone"
@@ -157,7 +155,9 @@ fw_zone_del() {
 # 踩过的坑：真机上跑 tun 之后，Mac 侧 en0 直接没载波，路由器 IP 不可达，
 # WAN 却还活着——交换芯片/驱动挂了，用户进程完全正常，只能人工断电。
 # 这个看门狗就是替人拔电源：LAN 曾经通、之后连续三次读不到载波，就 reboot。
-# 只在「通->断」时触发，不会因为开机时没插网线就重启。
+# 触发条件加了「隧道还在」：ace0 没了说明是正常断开流程，不是故障。
+# 「拔网线」和「驱动假死」从路由器侧无法区分，误拔 60 秒也会重启——
+# 不想用就把 lan_watchdog 设 0，或把 watchdog_action 设成 none（只记录）。
 lan_watchdog() {
 	local seen=0 bad=0 c
 	logger -t ace "LAN 看门狗已启动（br-lan 载波监测）"
@@ -172,6 +172,16 @@ lan_watchdog() {
 		bad=$((bad + 1))
 		logger -t ace "br-lan 载波丢失（第 $bad 次）"
 		if [ "$bad" -ge 3 ]; then
+			if ! ip link show "$TUN_DEV" >/dev/null 2>&1; then
+				logger -t ace "载波丢失但隧道已不在，按正常断开处理，看门狗退出"
+				return 0
+			fi
+			local action
+			action=$(cfg_get watchdog_action); action=${action:-reboot}
+			if [ "$action" = "none" ]; then
+				logger -t ace "br-lan 载波连续丢失（watchdog_action=none，仅记录不重启）"
+				continue
+			fi
 			echo "[$(date '+%F %T')] br-lan 载波连续丢失，重启路由器自愈" >> "$WATCH_LOG"
 			logger -t ace "br-lan 载波连续丢失，重启路由器自愈"
 			sync
@@ -180,22 +190,49 @@ lan_watchdog() {
 	done
 }
 
+# 探测内核解析器是否在监听。netstat 在精简 busybox 上可能没编入，
+# 依次退化到 ss、/proc/net/tcp（端口转成十六进制，state 0A = LISTEN）。
+resolver_listening() {
+	local hex
+	hex=$(printf '%04X' "$DNS_PORT" 2>/dev/null)
+	if command -v netstat >/dev/null 2>&1; then
+		netstat -ln 2>/dev/null | grep -qE "(127\.0\.0\.1|0\.0\.0\.0|\*):$DNS_PORT[[:space:]]"
+	elif command -v ss >/dev/null 2>&1; then
+		ss -ltn 2>/dev/null | grep -qE "(127\.0\.0\.1|0\.0\.0\.0|\*):$DNS_PORT[[:space:]]"
+	elif [ -n "$hex" ] && [ -r /proc/net/tcp ]; then
+		grep -qiE "(0100007F|00000000):$hex" /proc/net/tcp 2>/dev/null || \
+		grep -qiE "(0100007F|00000000):$hex" /proc/net/tcp6 2>/dev/null
+	else
+		return 1
+	fi
+}
+
 # ---------------------------------------------------------------- 就绪钩子
 # connect 是长跑进程，procd 起来就返回了。隧道真正可用的时刻只能等：
 # tun 设备出现 + 内核解析器在听，之后才有必要改 dnsmasq 和防火墙。
 post_up() {
 	local i=0
 	while [ "$i" -lt 180 ]; do
+		# 用户可能在这几十秒里点了断开：WATCH_FLAG 没了就立刻收手，
+		# 否则 stop 清完 zone/DNS 后我们又给加回去（真竞态，不是理论）。
+		[ -f "$WATCH_FLAG" ] || { logger -t ace "post_up: 服务已停止，取消接管"; return 0; }
 		if ip link show "$TUN_DEV" >/dev/null 2>&1; then
-			# 解析器起来后再改 dnsmasq，避免改完的那几秒整屋查不到域名
-			local j=0
+			# 解析器真的在听才改 dnsmasq。之前不管探没探到都往下走，
+			# 一旦失败 dnsmasq 上游指向死端口、整屋解析瘫痪（且断电重启
+			# 没人还原，见 start_service 里的 dns.bak 兜底）。
+			local j=0 resolver_up=0
 			while [ "$j" -lt 40 ]; do
-				if netstat -ln 2>/dev/null | grep -q "127.0.0.1:$DNS_PORT "; then
+				if resolver_listening; then
+					resolver_up=1
 					break
 				fi
 				j=$((j + 1)); sleep 0.5
 			done
-			is_on dns_takeover && dns_apply
+			if [ "$resolver_up" = "1" ]; then
+				is_on dns_takeover && dns_apply
+			else
+				logger -t ace "内核解析器未监听，跳过 DNS 接管（局域网解析不受影响）"
+			fi
 			fw_zone_add
 			# 流表里已有的连接还走老路由，清掉让它们重新选路
 			command -v conntrack >/dev/null 2>&1 && conntrack -F >/dev/null 2>&1
@@ -229,11 +266,18 @@ post_up() {
 
 # ---------------------------------------------------------------- 服务主体
 start_service() {
-	take_lock || return 0
+	take_lock || { logger -t ace "ace: 无法获取锁，启动请求已跳过"; return 1; }
 	# 告诉界面「正在朝 up 走」,api_status 据此显示处理中(隧道还在后台建时尤其有用)
 	echo up > "$ACE_PENDING" 2>/dev/null
-	config_load ace
 	mkdir -p "$ACE_HOME" /var/log
+
+	# 残留兜底：上一次引擎崩溃/断电时 stop 没跑成，dns.bak 还在而 dnsmasq
+	# 上游还指着本服务要用的解析器端口。现在引擎尚未启动，必须先还原，
+	# 否则整屋 DNS 挂在死端口上等隧道起来——隧道起不来就永久瘫痪。
+	if [ -f "$DNS_BAK" ]; then
+		logger -t ace "发现上次未还原的 DNS 备份，先恢复 dnsmasq"
+		dns_restore
+	fi
 
 	local proto ovpn region mport aport core
 	proto=$(cfg_get proto); proto=${proto:-awg}
@@ -275,7 +319,8 @@ start_service() {
 }
 
 stop_service() {
-	take_lock || return 0
+	# 拿不到锁必须报错而不是当成功：否则 LuCI 显示已断开、实际隧道还在跑
+	take_lock || { logger -t ace "ace: 无法获取锁，停止失败，请稍后重试"; return 1; }
 	local mport core
 	mport=$(cfg_get mixed_port); mport=${mport:-7890}
 	core=$(cfg_get core); core=${core:-/usr/bin/mihomo}

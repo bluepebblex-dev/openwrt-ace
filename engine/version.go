@@ -18,8 +18,8 @@ import (
 // the releases, the issue tracker, the notices and the licence — points here,
 // so no card ever sends the user hunting through a local folder.
 const (
-	repoOwner = "hezhanleiok"
-	repoName  = "ace"
+	repoOwner = "bluepebblex-dev"
+	repoName  = "openwrt-ace"
 	repoURL   = "https://github.com/" + repoOwner + "/" + repoName
 
 	repoReleasesURL = repoURL + "/releases"
@@ -37,7 +37,7 @@ const (
 
 	updateCheckTimeout = 2 * time.Second
 	updateCacheTTL     = 6 * time.Hour
-	updateCacheName    = "warpscout-latest-version"
+	updateCacheName    = "ace-latest-version"
 )
 
 // Set through -ldflags "-X main.version=" from the git tag; see VERSIONING.md.

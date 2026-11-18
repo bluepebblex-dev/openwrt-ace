@@ -33,5 +33,9 @@ config ace 'main'
 	# 交换芯片搞哑、必须人工断电的情况），连续三次后自动 reboot 恢复。
 	option lan_watchdog '1'
 
+	# 触发时的动作：reboot（默认）/ none（只记录不重启）。拔网线与驱动假死
+	# 从路由器侧无法区分，介意误重启的设成 none。
+	option watchdog_action 'reboot'
+
 	# 是否使用 IPv6 端点池
 	option ipv6 '0'

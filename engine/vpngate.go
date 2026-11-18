@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/filelock"
-	"github.com/xhwarp/warp-client/internal/fsowner"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/filelock"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/fsowner"
 )
 
 // OpenVPN egress (V2): the exit is a VPN Gate public relay, dialled by mihomo's

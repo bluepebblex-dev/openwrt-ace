@@ -148,7 +148,14 @@ OLD_CONF=/etc/config/xehn
 [ -f /etc/config/xehn ] || OLD_CONF=/tmp/xehn-migrate.conf
 # 注意不能用「/etc/config/ace 不存在」做条件：opkg 先铺数据文件再跑 postinst，
 # 包自带的默认 ace 配置此时已经在盘上，条件恒假、迁移永远不执行（1.1.0 首装实测）。
+# 反向风险同理：ace 配置已被用户改过时也不能覆盖——只有当现有内容与包内默认
+# 完全一致（或文件不存在）才迁移。包内默认的 md5 由打包脚本算好带进来。
+ACE_DEFAULT_MD5=""
 if [ -f "$OLD_CONF" ]; then
+	CURRENT_MD5=$(md5sum /etc/config/ace 2>/dev/null | awk '{print $1}')
+	if [ -f /etc/config/ace ] && [ -n "$ACE_DEFAULT_MD5" ] && [ "$CURRENT_MD5" != "$ACE_DEFAULT_MD5" ]; then
+		logger -t ace "检测到用户已修改 ace 配置，跳过旧版 xehn 迁移"
+	else
 	/etc/init.d/xehn stop >/dev/null 2>&1
 	/etc/init.d/xehn disable >/dev/null 2>&1
 	cp "$OLD_CONF" /etc/config/ace
@@ -164,6 +171,7 @@ if [ -f "$OLD_CONF" ]; then
 	logger -t ace "已迁移旧版 xehn 配置到 ace"
 	mv /etc/config/xehn /etc/config/xehn.migrated 2>/dev/null
 	rm -f /etc/rc.d/K10xehn /etc/rc.d/S99xehn
+	fi
 fi
 rm -f /tmp/xehn-migrate.conf
 # prerm 在升级开始前备份了用户改过的配置（opkg 的 conffiles 只对「已按
@@ -177,15 +185,32 @@ fi
 [ -x /usr/bin/mihomo ] || logger -t ace "提示：未找到 /usr/bin/mihomo，需在设置里指定内核路径"
 # 老版本升级上来时配置里没有新增的选项，补默认值（已有的值一律不动）
 if uci -q show ace.main >/dev/null 2>&1; then
-	for kv in tun=0 lan_watchdog=1 dns_leak=1; do
+	for kv in tun=0 lan_watchdog=1 dns_leak=1 watchdog_action=reboot; do
 		k=${kv%%=*}; v=${kv#*=}
 		[ -z "$(uci -q get ace.main.$k)" ] && uci -q set "ace.main.$k=$v"
 	done
 	uci -q commit ace
 fi
+# 升级前服务在跑就把它拉回来：之前 prerm stop 之后 postinst 只装文件不重启，
+# opkg upgrade 一轮下来 ACE 静默停在「已停止」，用户还以为一切正常。
+# 注意必须同步 start——后台 ( sleep 1; start ) & 会被 opkg 的脚本会话回收
+# 掉（1.0.1 真机实测：标记在、条件满足、进程却没起来）。start_service 本身
+# 是秒级（重活都在 procd/后台钩子里），同步跑不会拖住安装。
+if [ -f /tmp/ace-was-running ]; then
+	rm -f /tmp/ace-was-running
+	if [ "$(uci -q get ace.main.tun)" = "1" ] || [ "$(uci -q get ace.main.enabled)" = "1" ]; then
+		/etc/init.d/ace start >/dev/null 2>&1
+	fi
+fi
 exit 0
 """
 prerm = """#!/bin/sh
+# 记录升级前服务是否在跑（有引擎进程即视为运行中），postinst 据此拉回。
+# pidof 之外补 pgrep 兜底，个别精简镜像可能没编 pidof。
+if ! pidof ace-engine >/dev/null 2>&1; then
+	pgrep -f ace-engine >/dev/null 2>&1 || rm -f /tmp/ace-was-running
+fi
+: > /tmp/ace-was-running
 [ -x /etc/init.d/ace ] && /etc/init.d/ace stop >/dev/null 2>&1
 # 升级会把包内默认配置覆盖到 /etc/config/ace，先把用户改过的那份存起来，
 # postinst 里还原（仅升级场景：卸载时不会有 postinst，备份留在 /tmp 无害）。
@@ -197,6 +222,13 @@ rm -rf /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null
 /etc/init.d/rpcd reload >/dev/null 2>&1
 exit 0
 """
+
+# 把包内默认配置的 md5 注进 postinst，迁移逻辑用它判断「现有 ace 配置
+# 是否还是出厂默认」，避免覆盖用户改过的配置。
+import hashlib
+with open(os.path.join(root, "files", "etc", "config", "ace"), "rb") as _f:
+    _md5 = hashlib.md5(_f.read()).hexdigest()
+postinst = postinst.replace('ACE_DEFAULT_MD5=""', 'ACE_DEFAULT_MD5="%s"' % _md5)
 
 # 不写死 mihomo 依赖：ImmortalWrt 上内核常由 nikki 之类自带或手工放置，
 # opkg 里根本没有 mihomo 这个包，写上会让整包因「依赖无解」装不上。

@@ -27,7 +27,7 @@ import (
 
 	"github.com/lxn/walk"
 
-	"github.com/xhwarp/warp-client/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
 
 // guiNativeAvailable reports that this platform builds a native window.
@@ -1959,7 +1959,7 @@ func (u *natUI) onDown(x, y int) {
 	}
 }
 
-// clickDebug appends every press and its hit to %TEMP%\xh-click-debug.log when
+// clickDebug appends every press and its hit to %TEMP%\ace-click-debug.log when
 // WARP_UI_DEBUG is set — a temporary aid for the visual harness.
 func (u *natUI) clickDebug(x, y int) {
 	if os.Getenv("WARP_UI_DEBUG") == "" {
@@ -1978,7 +1978,7 @@ func (u *natUI) debugLogf(line string) {
 	if os.Getenv("WARP_UI_DEBUG") == "" {
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(os.TempDir(), "xh-click-debug.log"),
+	f, err := os.OpenFile(filepath.Join(os.TempDir(), "ace-click-debug.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err == nil {
 		_, _ = f.WriteString(time.Now().Format("15:04:05.000") + " " + line + "\r\n")

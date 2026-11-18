@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/subscription"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/subscription"
 )
 
 func main() {

@@ -39,7 +39,7 @@ func newConStyles(r *lipgloss.Renderer) conStyles {
 	}
 }
 
-const projectURL = "https://github.com/vernette/warpscout"
+const projectURL = "https://github.com/bluepebblex-dev/openwrt-ace"
 
 const (
 	statusOK = iota
@@ -431,9 +431,9 @@ func banner(st conStyles) string {
 		// misaligns - a U+1F49x heart is measured and rendered the same width.
 		heart = "💕"
 	}
-	credit := st.dim.Render("Made with ") + st.fail.Render(heart) + st.dim.Render(" by vernette")
+	credit := st.dim.Render("Made with ") + st.fail.Render(heart) + st.dim.Render(" with ACE")
 	return st.box.Render(lipgloss.JoinVertical(lipgloss.Center,
-		st.title.Render("WARPSCOUT"),
+		st.title.Render("ACE"),
 		credit,
 		st.dim.Render(projectURL),
 	))

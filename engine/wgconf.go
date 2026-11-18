@@ -233,7 +233,7 @@ func mihomoAddr(v4, v6, family string) []kv {
 	}
 }
 
-// mihomo lists proxies by name, so several warpscout configs pasted into one
+// mihomo lists proxies by name, so several ace configs pasted into one
 // file have to differ by protocol. The endpoint address stays out of it: the run
 // already picked the single best one, and the name would go stale on the next scan.
 func mihomoName(run protoRun) string {

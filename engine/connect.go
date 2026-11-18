@@ -18,8 +18,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/cache"
-	"github.com/xhwarp/warp-client/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/cache"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
 
 // connectStage, when set by the native GUI, receives human-readable progress
@@ -112,6 +112,9 @@ func proxyHelperAllowed() bool {
 // The system proxy is only touched AFTER the data plane is verified, so the
 // host is never pointed at a tunnel that does not pass traffic.
 func runConnectCmd(ctx context.Context, opts options) error {
+	// 每次连接都重置链式协议名：Psiphon/OpenVPN 路径不写它，不清的话
+	// 上一次 wwarp/masque-mm 会话留下的名字会顶到本次状态页里（display bug）。
+	chainUserProto = ""
 	err := runConnectInner(ctx, opts)
 	// The steps below report their own errors, and a step that dies because the
 	// context was cancelled usually wraps that into "registration failed: ...".

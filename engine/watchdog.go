@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/xhwarp/warp-client/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
 
 // runWatchdogCmd is the hidden "watchdog" subcommand the GUI spawns once per

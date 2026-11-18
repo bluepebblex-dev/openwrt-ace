@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/xhwarp/warp-client/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
 
 // TestProbeConfigsAccepted feeds every protocol's capability-probe config to a

@@ -225,7 +225,7 @@ var (
 	}}
 
 	outputGroup = flagGroup{"Output", []flagSpec{
-		{"o", "output", "FILE", "full per-endpoint report file (default warpscout-report-<timestamp>.txt)"},
+		{"o", "output", "FILE", "full per-endpoint report file (default ace-report-<timestamp>.txt)"},
 		{"", "no-report", "", "skip the report file entirely (overrides -o)"},
 		{"", "conf", "FILE", "write a ready-to-import config for the best endpoint (\"-\" prints it instead)"},
 		{"", "conf-type", "KIND", "format of -conf: native (wg/awg .conf, usque config.json), mihomo or mihomo-json"},

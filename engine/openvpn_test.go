@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
 
 // testOVPNProfile is a minimal VPN Gate-shaped profile: inline credentials and

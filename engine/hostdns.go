@@ -5,7 +5,7 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/xhwarp/warp-client/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
 
 // Resolver takeover lifecycle.

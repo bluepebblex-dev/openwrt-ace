@@ -36,9 +36,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/cache"
-	"github.com/xhwarp/warp-client/internal/core"
-	"github.com/xhwarp/warp-client/internal/subscription"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/cache"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/subscription"
 )
 
 // bridgeMsg is an inbound command.

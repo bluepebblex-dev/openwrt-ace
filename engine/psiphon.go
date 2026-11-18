@@ -23,16 +23,16 @@ import (
 // none of that. This file is the lifecycle only: no health guard, no repair
 // loop, no endpoint manager, no GUI.
 type Psiphon struct {
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	cancel   context.CancelFunc
-	pid      int
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	cancel    context.CancelFunc
+	pid       int
 	socksPort int
-	state    psiphonState
-	dataDir  string
-	exePath  string
-	upstream string
-	done     chan struct{}
+	state     psiphonState
+	dataDir   string
+	exePath   string
+	upstream  string
+	done      chan struct{}
 }
 
 type psiphonState int

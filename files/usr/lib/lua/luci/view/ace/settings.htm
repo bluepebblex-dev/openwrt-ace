@@ -100,6 +100,17 @@
 			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-lan_watchdog"></div>
 			<p class="sub">TUN 起来后若 br-lan 载波丢失（真机上出现过一次必须断电才能恢复的情况），连续三次读不到载波就自动重启，不必去拔电源。</p>
 		</div>
+
+		<div class="ace-row">
+			<div class="lbl">失联时动作</div>
+			<div class="ctl">
+				<select class="cbi-input-select" id="f-watchdog_action">
+					<option value="reboot">自动重启路由器（默认）</option>
+					<option value="none">只记录日志，不重启</option>
+				</select>
+			</div>
+			<p class="sub">拔网线和驱动假死从路由器侧无法区分，介意误重启的选「只记录」。</p>
+		</div>
 	</div>
 
 	<div class="ace-card">
@@ -137,6 +148,7 @@
 <script type="text/javascript">
 var ACE_GET = '<%=url("admin/services/ace/api/settings")%>';
 var ACE_SAVE = '<%=url("admin/services/ace/api/save")%>';
+var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var ACE_FLAGS = ['tun', 'openvpn', 'ipv6', 'dns_takeover', 'dns_leak', 'lan_watchdog', 'enabled'];
 
 function aceMsg(t, cls) {
@@ -150,7 +162,7 @@ function aceFill(d) {
 		var el = document.getElementById('f-' + k);
 		if (el) el.checked = (d[k] === '1' || d[k] === 'true' || d[k] === 'on');
 	});
-	['proto', 'openvpn_region', 'mixed_port', 'api_port', 'core'].forEach(function (k) {
+	['proto', 'openvpn_region', 'mixed_port', 'api_port', 'core', 'watchdog_action'].forEach(function (k) {
 		var el = document.getElementById('f-' + k);
 		if (el) el.value = d[k] || '';
 	});
@@ -168,12 +180,12 @@ function aceLoad() {
 }
 
 function aceSave() {
-	var body = [];
+	var body = ['token=' + encodeURIComponent(ACE_TOKEN)];
 	ACE_FLAGS.forEach(function (k) {
 		var el = document.getElementById('f-' + k);
 		if (el) body.push(k + '=' + (el.checked ? '1' : '0'));
 	});
-	['proto', 'openvpn_region', 'mixed_port', 'api_port', 'core'].forEach(function (k) {
+	['proto', 'openvpn_region', 'mixed_port', 'api_port', 'core', 'watchdog_action'].forEach(function (k) {
 		var el = document.getElementById('f-' + k);
 		if (el) body.push(k + '=' + encodeURIComponent(el.value));
 	});

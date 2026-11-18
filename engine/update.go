@@ -4,12 +4,16 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -81,6 +85,49 @@ func updateAsset(rel *releaseInfo) (releaseAsset, bool) {
 	return releaseAsset{}, false
 }
 
+// findAsset locates a release asset by exact name.
+func findAsset(rel *releaseInfo, name string) (releaseAsset, bool) {
+	for _, a := range rel.Assets {
+		if a.Name == name {
+			return a, true
+		}
+	}
+	return releaseAsset{}, false
+}
+
+var sha256Line = regexp.MustCompile(`\b[a-fA-F0-9]{64}\b`)
+
+// expectedChecksum fetches the SHA256 the publisher shipped next to the asset
+// (a `<name>.sha256` sidecar) and returns the hex digest it declares. There is
+// deliberately no fallback: a release without sidecar checksums is treated as
+// uninstallable, because "looks like an exe" is not an integrity check.
+func expectedChecksum(ctx context.Context, rel *releaseInfo, asset releaseAsset) (string, error) {
+	side, ok := findAsset(rel, asset.Name+".sha256")
+	if !ok {
+		return "", fmt.Errorf("发布缺少 %s.sha256 校验文件，拒绝安装", asset.Name)
+	}
+	raw, err := fetchUpdateZip(ctx, side.URL)
+	if err != nil {
+		return "", fmt.Errorf("下载校验文件失败：%w", err)
+	}
+	m := sha256Line.FindString(string(raw))
+	if m == "" {
+		return "", fmt.Errorf("校验文件格式不对")
+	}
+	return strings.ToLower(m), nil
+}
+
+// verifyChecksum compares the downloaded archive against the published digest
+// in constant time.
+func verifyChecksum(data []byte, expected string) error {
+	sum := sha256.Sum256(data)
+	got := hex.EncodeToString(sum[:])
+	if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+		return fmt.Errorf("SHA256 不匹配（期待 %s…，实际 %s…），更新包可能被篡改", expected[:12], got[:12])
+	}
+	return nil
+}
+
 // downloadUpdate fetches the release archive and leaves the new program next to
 // the running one as <exe>.new. Nothing is replaced yet: the caller swaps the
 // files once the transfer is proven good.
@@ -91,6 +138,12 @@ func downloadUpdate(ctx context.Context, rel *releaseInfo, logf func(string)) (s
 	asset, ok := updateAsset(rel)
 	if !ok {
 		return "", fmt.Errorf("该版本没有可下载的 zip")
+	}
+	// 供应链防线：先拿发布方随包发布的 SHA256，下载完立刻比对，
+	// 不过关的更新连解包都不会做。
+	expected, err := expectedChecksum(ctx, rel, asset)
+	if err != nil {
+		return "", err
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -108,6 +161,9 @@ func downloadUpdate(ctx context.Context, rel *releaseInfo, logf func(string)) (s
 		return "", err
 	}
 	logf(fmt.Sprintf("下载完成（%.1f MB），校验中…", float64(len(data))/(1<<20)))
+	if err := verifyChecksum(data, expected); err != nil {
+		return "", err
+	}
 
 	bin, err := extractExe(data)
 	if err != nil {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/cache"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/cache"
 )
 
 // TestCachedScanRoundTrip seeds a scan through the real cache.Store, reloads it,

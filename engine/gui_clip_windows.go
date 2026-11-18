@@ -3,8 +3,8 @@
 package main
 
 import (
-	"github.com/lxn/win"
 	"github.com/lxn/walk"
+	"github.com/lxn/win"
 )
 
 // clipCanvas restricts painting to r for the duration of fn. walk has no

@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/filelock"
-	"github.com/xhwarp/warp-client/internal/subscription"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/filelock"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/subscription"
 )
 
 const (

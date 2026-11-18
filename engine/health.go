@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/core"
-	"github.com/xhwarp/warp-client/internal/filelock"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/filelock"
 )
 
 // ---------------------------------------------------------------------------

@@ -18,14 +18,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/cache"
-	"github.com/xhwarp/warp-client/internal/core"
-	"github.com/xhwarp/warp-client/internal/filelock"
-	"github.com/xhwarp/warp-client/internal/fsowner"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/cache"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/filelock"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/fsowner"
 )
 
 // ---------------------------------------------------------------------------
-// The client layer: a thin state machine on top of the warpscout engine
+// The client layer: a thin state machine on top of the ace engine
 // (register + scan) and the embedded mihomo core. It is what the upcoming GUI
 // will drive, so everything here is written against the cache and core packages
 // rather than the terminal.
@@ -73,7 +73,16 @@ func accountPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(d, "warpscout-account.json"), nil
+	p := filepath.Join(d, "ace-account.json")
+	// 旧名迁移：上游时代账号文件叫 warpscout-account.json，直接改名会让人
+	// 莫名其妙重新注册（出口身份整个换掉）。这里就地改名搬过来。
+	old := filepath.Join(d, "warpscout-account.json")
+	if _, err := os.Stat(p); os.IsNotExist(err) {
+		if _, oerr := os.Stat(old); oerr == nil {
+			_ = os.Rename(old, p)
+		}
+	}
+	return p, nil
 }
 
 func coreDir() (string, error) {
@@ -418,7 +427,7 @@ func mustParseProto(p string) protoRun {
 	return r
 }
 
-// doScan runs the existing warpscout scan headlessly and projects the working
+// doScan runs the existing ace scan headlessly and projects the working
 // endpoints into cachedEndpoint records.
 func doScan(ctx context.Context, opts options) ([]cachedEndpoint, protoRun, error) {
 	if err := ensureAccount(ctx, opts); err != nil {
@@ -487,7 +496,7 @@ func projectCacheEndpoints(ph phaseResult) []cachedEndpoint {
 }
 
 // ---------------------------------------------------------------------------
-// Full mihomo config rendering. warpscout already renders the `proxies:` block
+// Full mihomo config rendering. ace already renders the `proxies:` block
 // for a single endpoint; a running client needs mixed-port, proxy-groups,
 // rules, dns and optionally a tun block around it.
 // ---------------------------------------------------------------------------
@@ -552,7 +561,7 @@ func renderClientConfig(opts options, ce cachedEndpoint, run protoRun) ([]byte, 
 		opts.apiPort = core.DefaultAPIPort
 	}
 
-	// Reuse warpscout's proxy renderer for one endpoint by rebuilding an
+	// Reuse ace's proxy renderer for one endpoint by rebuilding an
 	// options struct with the endpoint pinned and mihomo type selected.
 	renderOpts := opts
 	renderOpts.confType = confTypeMihomo

@@ -416,7 +416,7 @@ func (s *ipStack) tunnelPing(count int, timeout time.Duration) (time.Duration, f
 func (s *ipStack) sendEcho(pc *netstack.PingConn, seq int) bool {
 	msg := icmp.Message{
 		Type: ipv4.ICMPTypeEcho,
-		Body: &icmp.Echo{ID: 0xbeef, Seq: seq, Data: []byte("warpscout")},
+		Body: &icmp.Echo{ID: 0xbeef, Seq: seq, Data: []byte("ace")},
 	}
 	wire, err := msg.Marshal(nil)
 	if err != nil {

@@ -91,6 +91,7 @@
 var ACE_STATUS = '<%=url("admin/services/ace/api/status")%>';
 var ACE_ACTION = '<%=url("admin/services/ace/api/action")%>';
 var ACE_LOG = '<%=url("admin/services/ace/api/log")%>';
+var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var aceBusy = false;
 
 function aceFmtUptime(s) {
@@ -158,7 +159,6 @@ function aceLoadLog() {
 
 function aceClearLog() {
 	if (!confirm('确定清除运行日志？清除后面板里只剩之后的输出。')) return;
-	var kv = document.querySelector('input[name="token"]');
 	var x = new XMLHttpRequest();
 	x.open('POST', ACE_ACTION, true);
 	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
@@ -167,7 +167,7 @@ function aceClearLog() {
 		el.textContent = '（日志已清除）';
 		setTimeout(aceLoadLog, 400);
 	};
-	x.send('action=clearlog' + (kv ? '&token=' + encodeURIComponent(kv.value) : ''));
+	x.send('action=clearlog&token=' + encodeURIComponent(ACE_TOKEN));
 }
 
 function aceToggle() {
@@ -176,7 +176,7 @@ function aceToggle() {
 	aceBusy = true;
 	acePoll();
 
-	var body = 'action=' + (connected ? 'stop' : 'start');
+	var body = 'action=' + (connected ? 'stop' : 'start') + '&token=' + encodeURIComponent(ACE_TOKEN);
 	var x = new XMLHttpRequest();
 	x.open('POST', ACE_ACTION, true);
 	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');

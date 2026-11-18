@@ -17,7 +17,9 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,7 +159,7 @@ var masqueSNI = masqueDefaultSNI
 // The MASQUE flow lives on its own API version with its own client headers, and
 // registers in two steps: POST /reg mints a device the same way the Android
 // client does, PATCH /reg/{id} swaps its key for an ECDSA one and switches the
-// tunnel type. Done through warpscout's own doJSON rather than usque's api
+// tunnel type. Done through ace's own doJSON rather than usque's api
 // package so -proxy, -interface and the tunnel fallback keep working.
 const (
 	masqueRegURL           = "https://api.cloudflareclient.com/v0a4471/reg"
@@ -169,7 +171,7 @@ const (
 	masqueRegTunnelType    = "wireguard"
 	masqueRegModel         = "PC"
 	masqueRegLocale        = "en_US"
-	masqueRegDeviceName    = "warpscout"
+	masqueRegDeviceName    = "ace"
 	masqueRegOSVersion     = "10"
 	masqueRegSerialNumLen  = 8
 	masqueRegPlaceholderKB = 32
@@ -410,12 +412,31 @@ func (t *masqueTunnel) samePeer(endpoint string) bool {
 
 // quic-go and connect-ip-go write straight to the standard logger - a receive
 // buffer warning, then a line per closed stream, and every endpoint swap closes
-// one. warpscout never uses that logger itself, so the whole thing is muted
-// rather than left to scribble over the live dashboard.
+// one. Those two patterns are pure noise on the live dashboard, but blanket-
+// discarding the logger also swallowed real diagnostics written by the watchdog
+// and health loops (they share this logger). So filter the known noise and pass
+// everything else through to wherever the logger pointed before.
 var muteLibLog sync.Once
 
+// libNoiseFilter drops the quic/connect-ip chatter lines and forwards the rest.
+type libNoiseFilter struct{ next io.Writer }
+
+func (w libNoiseFilter) Write(p []byte) (int, error) {
+	s := string(p)
+	if strings.Contains(s, "receive buffer") || strings.Contains(s, "closed stream") {
+		return len(p), nil
+	}
+	return w.next.Write(p)
+}
+
 func newMasqueTunnel(h2 bool) (*masqueTunnel, error) {
-	muteLibLog.Do(func() { log.SetOutput(io.Discard) })
+	muteLibLog.Do(func() {
+		prev := log.Default().Writer()
+		if prev == nil {
+			prev = os.Stderr
+		}
+		log.SetOutput(libNoiseFilter{prev})
+	})
 	if masqueAcct == nil {
 		return nil, fmt.Errorf("no MASQUE device in the account file: run \"ace register\" again")
 	}

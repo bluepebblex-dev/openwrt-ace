@@ -91,7 +91,7 @@ var (
 )
 
 // -sweep-ports: "open" keeps phase 1 and sweeps the ports it found, "all" skips
-// phase 1 and sweeps every port warpscout knows about.
+// phase 1 and sweeps every port ace knows about.
 const (
 	sweepOpen = "open"
 	sweepAll  = "all"

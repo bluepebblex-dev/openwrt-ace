@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
 
 // TestMihomoAcceptsRenderedConfig is the core-integration proof: it renders a

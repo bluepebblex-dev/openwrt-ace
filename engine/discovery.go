@@ -238,7 +238,7 @@ func sendHostEcho(conn *icmp.PacketConn, dst net.Addr, seq int) bool {
 	echoType, _ := icmpEchoTypes(dst)
 	wire, err := (&icmp.Message{
 		Type: echoType,
-		Body: &icmp.Echo{ID: pingID, Seq: seq, Data: []byte("warpscout")},
+		Body: &icmp.Echo{ID: pingID, Seq: seq, Data: []byte("ace")},
 	}).Marshal(nil)
 	if err != nil {
 		return false

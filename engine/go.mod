@@ -1,4 +1,4 @@
-module github.com/xhwarp/warp-client
+module github.com/bluepebblex-dev/openwrt-ace/engine
 
 go 1.26.3
 

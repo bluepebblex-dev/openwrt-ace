@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
 
 // The carrier has to end up as an outbound of its own, with the outermost WARP

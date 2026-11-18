@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/filelock"
-	"github.com/xhwarp/warp-client/internal/fsowner"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/filelock"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/fsowner"
 )
 
 // Store is a tiny TTL cache persisted to a single JSON file. It holds two kinds
@@ -38,7 +38,7 @@ type Entry struct {
 }
 
 // ScanResult is the canonical record the client caches for one protocol scan.
-// It directly echoes what warpscout's endpointResult already computes, so a
+// It directly echoes what ace's endpointResult already computes, so a
 // stale-but-fresh cache can feed the UI without a rescan.
 type ScanResult struct {
 	Proto   string    `json:"proto"`

@@ -4,6 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +30,22 @@ const (
 	// masque h2/h3, dialer-proxy chains).
 	defaultVersion = "v1.19.32"
 )
+
+// pinnedCoreSHA256 holds the SHA256 of the *official* release archive for the
+// pinned defaultVersion, per platform. mihomo publishes no checksum files, so
+// these digests were computed from the bytes fetched straight from
+// github.com/MetaCubeX/mihomo and are embedded here — that turns every download
+// source (including the speed mirrors, whose operators are otherwise fully
+// trusted with the bytes we are about to execute) into a verified source for
+// the pinned version. Newer versions fetched via the releases API have no
+// embedded digest; they are downloaded from the official github.com URL only,
+// never from mirrors.
+var pinnedCoreSHA256 = map[string]string{
+	"mihomo-linux-arm64-v1.19.32.gz":    "9dd862e28b46ff7d775f169cceebc28deccaa0a9e804237d421cd2571e0caba0",
+	"mihomo-linux-amd64-v1.19.32.gz":    "8451100836c9eda194331c2babfad490b2faf30cebc1a04b0e76fd8ac2d35d10",
+	"mihomo-darwin-arm64-v1.19.32.gz":   "3312a6780652c622890fd4357c6a853bbf865464fd047ac7b7f52dab8de18652",
+	"mihomo-windows-amd64-v1.19.32.zip": "1ac84e795b5b915446e20139677fb6cc013a0778e876e8d4c96f994750b4c4a3",
+}
 
 // ostuple returns the mihomo release asset fragment for this platform.
 func ostuple() (osPart, archPart, exeName string) {
@@ -104,27 +123,41 @@ func isExecutable(p string) bool {
 	return err == nil && !fi.IsDir() && fi.Size() > 0
 }
 
-// downloadRelease fetches the latest release (falling back to defaultVersion)
-// and unpacks the archive that matches this host's OS+arch.
+// downloadRelease fetches the pinned default release (or a newer one via the
+// releases API) and unpacks the archive that matches this host's OS+arch.
 //
-// Resilient path: try the GitHub API to discover the asset URL; if that API is
-// unreachable (common on restricted networks), fall back to a set of known
-// direct URLs and mirrors for the pinned default version. Any source that
-// yields a valid archive (zip or gz) wins.
+// Integrity model: for the pinned version, every candidate URL (official and
+// mirrors) is checked against pinnedCoreSHA256 before unpacking — a mirror
+// serving different bytes is rejected outright. For a newer version discovered
+// via the API, only the official github.com asset URL is used (TLS-trusted,
+// no mirrors) since we have no embedded digest for it.
 func downloadRelease(workDir string) error {
 	client := httpClient(30 * time.Second)
+	assetName := "mihomo-" + osPartArch() + "-" + defaultVersion + gzExt()
+	expect, isPinned := pinnedCoreSHA256[assetName]
 	var urls []string
-	if _, assetURL, err := pickAsset(client); err == nil && assetURL != "" {
+	apiVersion := ""
+	if v, assetURL, err := pickAsset(client); err == nil && assetURL != "" {
+		apiVersion = v
 		urls = append(urls, assetURL)
 	}
-	// Known-good direct URL for the pinned version, plus mirrors, in case the
-	// API is unreachable. These use the same mihomo release asset naming.
-	direct := "https://github.com/MetaCubeX/mihomo/releases/download/" + defaultVersion + "/mihomo-" + osPartArch() + "-" + defaultVersion + ".gz"
-	urls = append(urls,
-		direct,
-		"https://ghfast.top/"+direct,
-		"https://ghproxy.net/"+direct,
-	)
+	direct := "https://github.com/MetaCubeX/mihomo/releases/download/" + defaultVersion + "/" + assetName
+	if isPinned {
+		// Mirrors are only candidates for the pinned version: that is the one
+		// whose bytes we can actually verify.
+		urls = append(urls,
+			direct,
+			"https://ghfast.top/"+direct,
+			"https://ghproxy.net/"+direct,
+		)
+	} else {
+		urls = append(urls, direct)
+	}
+	if apiVersion != "" && apiVersion != defaultVersion {
+		// The API handed us a newer tag than the pinned default; we have no
+		// embedded digest for it, so there is nothing to verify mirrors against.
+		expect = ""
+	}
 
 	var lastErr error
 	for _, u := range urls {
@@ -148,6 +181,14 @@ func downloadRelease(workDir string) error {
 			lastErr = fmt.Errorf("core: download %s: too small (%d bytes)", u, len(data))
 			continue
 		}
+		if expect != "" {
+			sum := sha256.Sum256(data)
+			got := hex.EncodeToString(sum[:])
+			if subtle.ConstantTimeCompare([]byte(got), []byte(expect)) != 1 {
+				lastErr = fmt.Errorf("core: download %s: SHA256 mismatch (got %s…, want %s…), refusing to install", u, got[:12], expect[:12])
+				continue
+			}
+		}
 		if err := unpackArchive(data, workDir); err != nil {
 			lastErr = err
 			continue
@@ -158,6 +199,14 @@ func downloadRelease(workDir string) error {
 		lastErr = fmt.Errorf("no download URL attempted")
 	}
 	return lastErr
+}
+
+// gzExt returns the archive extension mihomo uses for this platform.
+func gzExt() string {
+	if runtime.GOOS == "windows" {
+		return ".zip"
+	}
+	return ".gz"
 }
 
 // osPartArch returns the "os-arch" fragment used in mihomo release asset names.

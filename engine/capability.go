@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xhwarp/warp-client/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
 
 // probeOpenVPNProto is the capability name for the native openvpn outbound. It

@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/xhwarp/warp-client/internal/core"
-	"github.com/xhwarp/warp-client/internal/filelock"
-	"github.com/xhwarp/warp-client/internal/fsowner"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/filelock"
+	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/fsowner"
 )
 
 // Pages of the shell. The window opens on the page the user left, so these
