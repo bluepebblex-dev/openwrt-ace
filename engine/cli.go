@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 
 	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
@@ -236,6 +237,12 @@ func main() {
 		// Internal: JSON-lines control channel used by the macOS UI.
 		os.Exit(runBridge())
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "core" {
+		// Internal: provision the mihomo core binary. LuCI's "下载内核" button
+		// shells out to this; hidden from the command list like the others,
+		// since nobody types it by hand.
+		os.Exit(runCoreInstall(os.Args[2:]))
+	}
 	switch os.Args[1] {
 	case "-h", "-help", "--help", "help":
 		rootUsage(os.Stdout)
@@ -279,4 +286,39 @@ func lookupCommand(name string) *command {
 		}
 	}
 	return nil
+}
+
+// runCoreInstall provisions the mihomo core binary into -dir and prints the
+// resolved path. It reuses core.EnsureBinary, so every download candidate
+// (official + mirrors) is checked against the embedded SHA256 for the pinned
+// version before anything is unpacked.
+func runCoreInstall(args []string) int {
+	fs := flag.NewFlagSet("core", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	dir := fs.String("dir", "", "target directory for the core binary")
+	force := fs.Bool("force", false, "re-download even when a binary is already present")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	target := *dir
+	if target == "" {
+		home, err := appDir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errPal.fail(err.Error()))
+			return 1
+		}
+		target = filepath.Join(home, "core")
+	}
+	if *force {
+		// 忽略错误：本来就不存在时 Remove 会报 ENOENT
+		_ = os.Remove(core.CoreInDir(target))
+	}
+	bin, err := core.EnsureBinary(target, "")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errPal.fail(err.Error()))
+		return 1
+	}
+	fmt.Println(bin)
+	return 0
 }

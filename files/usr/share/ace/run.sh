@@ -14,8 +14,8 @@ core=$(uci -q get ace.main.core); core=${core:-/usr/bin/mihomo}
 ovpn=$(uci -q get ace.main.openvpn)
 region=$(uci -q get ace.main.openvpn_region)
 ipv6=$(uci -q get ace.main.ipv6)
-# 节点页「设为默认」写入的出口端点（ip:port）。非空时强制走它，否则引擎
-# 自动挑最优。校验在 LuCI 写入侧做过（只认扫描缓存里的端点）。
+# 固定出口端点（ip:port，uci 手工指定或由脚本写入）。非空时强制走它，
+# 否则引擎自动挑最优。
 pick=$(uci -q get ace.main.pick)
 # TUN 是显式开关：dns_takeover 只在 tun=1 时才有意义（没 TUN 就没有内核
 # 解析器可指），所以这里不反向推断，避免「打开 DNS 接管」顺手把 TUN 也带上。
@@ -31,8 +31,13 @@ LOG=/var/log/ace.log
 # -hold 让 connect 连上之后不返回，procd 才有「一个活着的 PID」可看护。
 # 不带它的话 connect 打完状态行就退出，procd 每隔几秒重生一次，每次都把
 # 上一个内核杀掉重建隧道（日志里会看到一串 killed stale core + connected）。
-set -- connect -hold -proto "$proto" -core "$core" \
+set -- connect -hold -proto "$proto" \
 	-mixed-port "$mport" -api-port "$aport" -no-proxy
+
+# 内核路径只在真的可执行时才传。传一个失效路径是硬错误——引擎会直接退出，
+# 不会回落到自己下载；省略 -core 时引擎按「$WARP_CLIENT_HOME/core → 下载」
+# 的顺序找一个可用的，下载带内嵌 SHA256 校验（LuCI 设置页的「下载内核」同理）。
+[ -x "$core" ] && set -- "$@" -core "$core"
 
 # tun=1 才接管整屋流量；不带 TUN 时仍会起本地混合端口，可以先用
 # curl -x http://127.0.0.1:7890 验通路，确认引擎正常再开 TUN

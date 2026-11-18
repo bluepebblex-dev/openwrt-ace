@@ -29,7 +29,8 @@ Go 引擎 + procd 服务 + LuCI 界面。注册账号、扫端点、挑最优、
 | **防污染** | `dns_leak=1` 时上游只留可信解析器，剔掉会被递归污染的国内解析器 |
 | **自愈** | 探活连续三次失败自动断开；`br-lan` 载波丢失自动重启（可关） |
 | **升级保配置** | conffiles + prerm/postinst 备份还原，升级不把 `tun` 打回 0 |
-| **界面同构** | 首页 / 节点 / 设置三页，布局与 macOS 桌面端一致 |
+| **内核自举** | 路由器上没有 mihomo 也能用：设置页一键下载（官方源 + 镜像，装前校验 SHA256） |
+| **界面同构** | 首页 / 设置两页，布局与 macOS 桌面端一致 |
 
 ## 安装
 
@@ -47,9 +48,13 @@ ACE_SSH_PASS=路由器密码 ./install.sh 192.168.1.1
 
 装完打开 **LuCI → 服务 → ACE**（浏览器强刷一次，旧缓存会看不到新界面）。
 
+> 路由器上已经装了 mihomo（nikki / OpenClash 之类通常都会带）就直接复用；没有的话打开设置页点
+> 「下载内核」：取官方 v1.19.32（GitHub 不通时自动换镜像），下载后校验 SHA256，装到
+> `/etc/ace/core/mihomo`，约 15 MB。
+
 | 包 | 内容 | 依赖 |
 |---|---|---|
-| `ace` | 引擎二进制、init.d、uci 配置 | `mihomo`（内核，通常由 nikki 等自带） |
+| `ace` | 引擎二进制、init.d、uci 配置 | `mihomo` 可选（没有时在设置页下载，或复用 nikki 自带的） |
 | `luci-app-ace` | LuCI 控制器与页面 | `ace`、`luci-compat` |
 
 > 目前只出 `aarch64_cortex-a53`（mediatek/filogic 等）。其他架构改 `build-ipk.sh` 里的
@@ -78,17 +83,11 @@ TUN 之后 LAN 侧设备直接失联、路由器 IP 不可达但 WAN 还活着�
 
 ## 界面
 
-三个页面，和 macOS 桌面端同一套结构。
+两个页面，和 macOS 桌面端同一套结构。
 
 **首页** —— 大圆钮一键连接/断开（连接过程显示阶段、可点取消）；协议与出口地区就地切换；信息卡显示
 本机 IP / 出口国家（国旗 + Cloudflare 机房）/ 延迟 / 出口 IP；流量卡显示上下行实时速率与本次累计；
 下方是运行日志（服务事件 + 引擎输出，可刷新、可清除）。
-
-**节点页** —— 最近一次端点扫描的结果：国旗、城市 · 端点、延迟、质量条。支持搜索、按「全部 / 可用 /
-收藏」筛选、按延迟或名称排序。点行 = 设为默认出口（`pick`，再点一次清除），星标 = 收藏；右上角
-「刷新扫描」在后台重扫端点池，几分钟，期间不影响上网。
-
-![节点页：扫描结果、筛选与收藏](docs/screenshots/luci-nodes.png)
 
 **设置页** —— 连接方式、TUN 接管、DNS 接管 / 防泄漏、LAN 失联自愈等运行参数，保存后服务自动重启
 （隧道重建约 10~20 秒）。
@@ -111,7 +110,7 @@ TUN 之后 LAN 侧设备直接失联、路由器 IP 不可达但 WAN 还活着�
 | `masque-h2` | MASQUE，CONNECT-IP over HTTP/2/TCP |
 | `masque-mm` | MASQUE-in-MASQUE，嵌套隧道 |
 
-> MASQUE 系协议没有「可选端点」的概念，节点页只列 wg/awg 的扫描结果。
+> 端点由引擎自动挑选（扫描缓存 6 小时内复用）。MASQUE 系没有「端点池」的概念，走 Cloudflare 固定 anycast。
 
 ## 配置项
 
@@ -132,7 +131,7 @@ TUN 之后 LAN 侧设备直接失联、路由器 IP 不可达但 WAN 还活着�
 | `starred` | 空 | 收藏的端点列表（仅界面筛选用） |
 | `mixed_port` | `7890` | 本地混合代理端口（旁路调试用） |
 | `ipv6` | `0` | 使用 IPv6 端点池 |
-| `core` | `/usr/bin/mihomo` | 内核二进制路径 |
+| `core` | 空 | 内核路径，空 = `/usr/bin/mihomo`；也可留空让引擎用 `/etc/ace/core/mihomo` |
 
 ## 设计取舍
 
@@ -204,6 +203,7 @@ HK），跟到 `.com.hk` 拿到 200 + 标题即正常，不是故障。
 
 | 现象 | 位置 |
 |---|---|
+| 提示「未检测到 mihomo 内核」 | 设置页点「下载内核」；或指定现成内核 `uci set ace.main.core=/usr/bin/mihomo` |
 | 连不上、卡在扫描 | `tail -f /var/log/ace.log`，或在首页日志区看「服务事件」 |
 | 内核起不来 | `/etc/ace/core/core.log` |
 | 出口 IP 对但怀疑没走隧道 | 看 `ace0` 计数器是否增长（验证①），并确认设备自身无隧道（②） |
@@ -223,9 +223,9 @@ HK），跟到 `.com.hk` 拿到 200 + 标题即正常，不是故障。
 | 流量接管 | utun + 系统解析器 | `ace0` + dnsmasq 上游 |
 | 系统代理 | 不设置（TUN 全接管） | 不涉及 |
 | DNS 端口 | 127.0.0.1:53 | 127.0.0.1:7874 |
-| 界面 | Swift 原生窗口 | LuCI 页面（首页 / 节点 / 设置，同构布局） |
+| 界面 | Swift 原生窗口 | LuCI 页面（首页 / 设置，同构布局） |
 | 生命周期 | GUI 持有 | procd 看护 |
-| 节点缓存 | settings.json | `/etc/ace/cache.json`（引擎共用） |
+| 端点缓存 | settings.json | `/etc/ace/cache.json`（引擎共用，TTL 6 小时） |
 
 ## 构建
 
@@ -251,7 +251,7 @@ openwrt-ace/
     └── usr/
         ├── share/ace/run.sh  # uci → 命令行
         ├── share/rpcd/acl.d/ # LuCI ACL
-        └── lib/lua/luci/     # 控制器 + 首页/节点/设置页面
+        └── lib/lua/luci/     # 控制器 + 首页/设置页面
 ```
 
 ## License

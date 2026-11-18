@@ -93,6 +93,13 @@
 	}
 	.ace-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 	.ace-note { font-size: 12px; opacity: .68; margin-top: 12px; line-height: 1.6; }
+	.ace-warn {
+		display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+		margin-top: 14px; padding: 10px 14px; border-radius: 10px;
+		font-size: 12.5px; line-height: 1.5;
+		background: rgba(240, 180, 41, .14); border: 1px solid rgba(240, 180, 41, .5);
+	}
+	.ace-warn a { font-weight: 600; text-decoration: underline; }
 	.ace-toast {
 		position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(8px);
 		background: #1c2733; color: #eaf0f7; padding: 10px 18px; border-radius: 10px;
@@ -105,7 +112,7 @@
 <div class="ace-wrap">
 	<div class="ace-page">
 		<h2>ACE</h2>
-		<span class="tag">WARP / AmneziaWG · <a href="<%=url('admin/services/ace/nodes')%>">节点</a> · <a href="<%=url('admin/services/ace/settings')%>">设置</a></span>
+		<span class="tag">WARP / AmneziaWG · <a href="<%=url('admin/services/ace/settings')%>">设置</a></span>
 	</div>
 
 	<div class="ace-pickers">
@@ -127,6 +134,11 @@
 				<input type="text" id="f-region" maxlength="2" placeholder="自动">
 			</span>
 		</label>
+	</div>
+
+	<div class="ace-warn" id="coreWarn" style="display:none">
+		<span id="coreWarnText">未检测到 mihomo 内核，点连接会失败。</span>
+		<a href="<%=url('admin/services/ace/settings')%>">去设置页下载内核 →</a>
 	</div>
 
 	<div class="ace-hero">
@@ -176,7 +188,6 @@
 		<div class="ace-actions">
 			<button class="btn cbi-button" onclick="aceLoadLog()">刷新</button>
 			<button class="btn cbi-button" onclick="aceClearLog()">清除日志</button>
-			<a class="btn cbi-button" href="<%=url('admin/services/ace/nodes')%>">节点</a>
 			<a class="btn cbi-button" href="<%=url('admin/services/ace/settings')%>">设置</a>
 		</div>
 	</div>
@@ -236,6 +247,17 @@ function aceFmtRate(b) {
 
 function aceRender(d) {
 	var knob = document.getElementById('knob');
+
+	/* 内核缺失时连接一定失败——把原因和入口摆在按钮上面，别让人看日志猜 */
+	var warn = document.getElementById('coreWarn');
+	if (d.core && !d.core.ok) {
+		warn.style.display = '';
+		document.getElementById('coreWarnText').textContent = d.core_installing
+			? '正在下载 mihomo 内核，完成后自动可用…'
+			: '未检测到 mihomo 内核，点连接会失败。';
+	} else {
+		warn.style.display = 'none';
+	}
 
 	/* 流量速率：两次轮询总量差 / 实际间隔 */
 	if (d.up_total !== undefined && d.down_total !== undefined && aceLast && aceLastT) {

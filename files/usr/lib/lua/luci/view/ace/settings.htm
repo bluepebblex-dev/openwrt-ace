@@ -17,6 +17,13 @@
 	.ace-row .ctl { flex: 1 1 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 	.ace-row .sub { flex: 1 1 100%; font-size: 11.5px; opacity: .6; margin: 4px 0 0; line-height: 1.55; }
 	.ace-row input[type=text], .ace-row select { min-width: 220px; }
+	.ace-core-stat {
+		font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
+		border: 1px solid rgba(128, 128, 128, .4); opacity: .8; white-space: nowrap;
+	}
+	.ace-core-stat.ok { border-color: #2ea043; color: #2ea043; opacity: 1; }
+	.ace-core-stat.bad { border-color: #d29922; color: #d29922; opacity: 1; }
+	.ace-core-stat.busy { border-color: #58a6ff; color: #58a6ff; opacity: 1; }
 	.ace-toggle { width: 18px; height: 18px; accent-color: #2f7d4f; }
 	.ace-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 	.ace-msg { font-size: 12.5px; }
@@ -126,9 +133,17 @@
 			<div class="ctl"><input type="number" class="cbi-input-text" id="f-api_port" min="1" max="65535" style="width:110px;min-width:110px"></div>
 		</div>
 		<div class="ace-row">
-			<div class="lbl">内核路径</div>
-			<div class="ctl"><input type="text" class="cbi-input-text" id="f-core" placeholder="/usr/bin/mihomo"></div>
-			<p class="sub">留空使用 /usr/bin/mihomo。自行替换内核时填绝对路径。</p>
+			<div class="lbl">内核</div>
+			<div class="ctl">
+				<input type="text" class="cbi-input-text" id="f-core" placeholder="/usr/bin/mihomo">
+				<span class="ace-core-stat" id="coreStat">检测中…</span>
+				<button class="btn cbi-button" id="coreBtn" onclick="aceInstallCore()">下载内核</button>
+			</div>
+			<p class="sub">
+				留空则用 <code>/usr/bin/mihomo</code>。路由器上没有 mihomo 时点「下载内核」：
+				取官方 v1.19.32（源不通时自动换镜像），下载后校验 SHA256 再装到
+				<code>/etc/ace/core/mihomo</code>，约 15 MB。
+			</p>
 		</div>
 	</div>
 
@@ -148,6 +163,8 @@
 <script type="text/javascript">
 var ACE_GET = '<%=url("admin/services/ace/api/settings")%>';
 var ACE_SAVE = '<%=url("admin/services/ace/api/save")%>';
+var ACE_STATUS = '<%=url("admin/services/ace/api/status")%>';
+var ACE_CORE = '<%=url("admin/services/ace/api/core")%>';
 var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var ACE_FLAGS = ['tun', 'openvpn', 'ipv6', 'dns_takeover', 'dns_leak', 'lan_watchdog', 'enabled'];
 
@@ -215,7 +232,83 @@ function aceSave() {
 	x.send(body.join('&'));
 }
 
+/* ---------------------------------------------------------------- 内核
+   引擎自带下载（官方源 + 镜像，内嵌 SHA256 校验）。这里只负责触发和盯进度。 */
+function aceSize(b) {
+	if (!b) return '0 B';
+	if (b < 1048576) return Math.round(b / 1024) + ' KB';
+	return (b / 1048576).toFixed(1) + ' MB';
+}
+
+function aceCoreRender(d) {
+	var stat = document.getElementById('coreStat');
+	var btn = document.getElementById('coreBtn');
+	if (d.core_installing) {
+		stat.className = 'ace-core-stat busy';
+		stat.textContent = '正在下载内核…';
+		stat.title = d.core_log || '';
+		btn.disabled = true;
+		btn.textContent = '下载中';
+		return true;
+	}
+	btn.disabled = false;
+	var c = d.core || {};
+	if (c.ok) {
+		stat.className = 'ace-core-stat ok';
+		stat.textContent = '已就绪 · ' + aceSize(c.size) + (c.src === 'downloaded' ? '（下载版）' : '');
+		stat.title = c.path || '';
+		btn.textContent = '重新下载';
+	} else {
+		stat.className = 'ace-core-stat bad';
+		stat.textContent = '未找到';
+		stat.title = d.core_log || '';
+		btn.textContent = '下载内核';
+	}
+	return false;
+}
+
+function aceCorePoll(times) {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_STATUS + '?t=' + Date.now(), true);
+	x.onload = function () {
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) { return; }
+		/* 下载中每 2.5 秒看一次，最多盯 5 分钟 */
+		if (aceCoreRender(d) && (times || 0) < 120) {
+			setTimeout(function () { aceCorePoll((times || 0) + 1); }, 2500);
+		}
+	};
+	x.send();
+}
+
+function aceInstallCore() {
+	if (!confirm('从 GitHub 下载 mihomo 内核（约 15 MB），下载后校验 SHA256，继续？')) return;
+	var stat = document.getElementById('coreStat');
+	document.getElementById('coreBtn').disabled = true;
+	stat.className = 'ace-core-stat busy';
+	stat.textContent = '正在启动…';
+	var x = new XMLHttpRequest();
+	x.open('POST', ACE_CORE, true);
+	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+	x.onload = function () {
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) {}
+		if (x.status !== 200 || !d || !d.ok) {
+			aceMsg('启动下载失败（HTTP ' + x.status + '）', 'err');
+			document.getElementById('coreBtn').disabled = false;
+			return;
+		}
+		aceCorePoll(0);
+	};
+	x.onerror = function () {
+		aceMsg('启动下载失败（网络错误）', 'err');
+		document.getElementById('coreBtn').disabled = false;
+	};
+	x.send('action=install&token=' + encodeURIComponent(ACE_TOKEN));
+}
+
 aceLoad();
+aceCorePoll(0);
 </script>
 
 <%+footer%>

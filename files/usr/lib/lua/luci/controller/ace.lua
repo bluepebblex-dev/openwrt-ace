@@ -26,16 +26,13 @@ function index()
 	page.order = 60
 	page.icon = "luci-icon-luci-app-ace"
 
-	entry({"admin", "services", "ace", "nodes"}, template("ace/nodes"), _("节点"), 5)
 	entry({"admin", "services", "ace", "settings"}, template("ace/settings"), _("设置"), 10)
 	entry({"admin", "services", "ace", "api", "status"}, call("api_status")).leaf = true
 	entry({"admin", "services", "ace", "api", "action"}, call("api_action")).leaf = true
 	entry({"admin", "services", "ace", "api", "log"}, call("api_log")).leaf = true
 	entry({"admin", "services", "ace", "api", "settings"}, call("api_settings")).leaf = true
 	entry({"admin", "services", "ace", "api", "save"}, call("api_save")).leaf = true
-	entry({"admin", "services", "ace", "api", "nodes"}, call("api_nodes")).leaf = true
-	entry({"admin", "services", "ace", "api", "scan"}, call("api_scan")).leaf = true
-	entry({"admin", "services", "ace", "api", "pick"}, call("api_pick")).leaf = true
+	entry({"admin", "services", "ace", "api", "core"}, call("api_core")).leaf = true
 end
 
 -- ---------------------------------------------------------------- CSRF
@@ -69,122 +66,6 @@ local function shq(s)
 	return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
 end
 
--- 扫描缓存：引擎把每次端点扫描的结果写进 /etc/ace/cache.json
--- （键 scan-<proto>-v4/v6，payload 是 base64 的 JSON，TTL 6 小时）。
--- LuCI 直接读这份文件喂节点页，不经过引擎进程。
-local SCAN_FLAG = "/var/run/ace-scanning"
-
-local function read_cache_entries()
-	local raw = fs.readfile("/etc/ace/cache.json")
-	if not raw or raw == "" then
-		return nil
-	end
-	local ok, tbl = pcall(function()
-		return require("luci.jsonc").parse(raw)
-	end)
-	if ok and type(tbl) == "table" then
-		return tbl
-	end
-	return nil
-end
-
--- 纯 Lua base64 解码。ImmortalWrt 的 nixio.so 是精简编译，没有 nixio.bin
--- （b64decode 不存在，真机实测 require 直接报错）；不引第三方依赖。
-local B64D = {}
-for i, c in ipairs({ "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
-	"N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
-	"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
-	"n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
-	"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "+", "/" }) do
-	B64D[c] = i - 1
-end
-
-local function b64decode(s)
-	if not s then
-		return nil
-	end
-	s = s:gsub("[^%w%+%/]", "")
-	local out, buf, bits = {}, 0, 0
-	for i = 1, #s do
-		local v = B64D[s:sub(i, i)]
-		if v then
-			buf = buf * 64 + v
-			bits = bits + 6
-			if bits >= 8 then
-				bits = bits - 8
-				out[#out + 1] = string.char(math.floor(buf / 2 ^ bits) % 256)
-				buf = buf % 2 ^ bits
-			end
-		end
-	end
-	return table.concat(out)
-end
-
--- 取某一协议的扫描结果列表；过期（TTL 外）或损坏一律当没有。
-local function scan_results_for(proto, fam)
-	local entries = read_cache_entries()
-	if not entries then
-		return nil, nil
-	end
-	local e = entries["scan-" .. proto .. "-" .. fam]
-	if type(e) ~= "table" or type(e.payload) ~= "string" then
-		return nil, nil
-	end
-	if e.expires_at then
-		-- Go time.Time 的 JSON 带小数秒，这里内联解析（parse_rfc3339 定义在后）
-		local t = os.time()
-		local y, mo, d, h, mi, sec, frac, tz =
-			e.expires_at:match("^(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)(%.%d+)?([Z%+%-][%d:+]*)$")
-		if y then
-			local epoch = os.time({ year = tonumber(y), month = tonumber(mo), day = tonumber(d),
-				hour = tonumber(h), min = tonumber(mi), sec = tonumber(sec), isdst = false })
-			if tz and tz ~= "Z" then
-				local sign, oh, om = tz:match("^([%+%-])(%d%d):(%d%d)$")
-				if sign then
-					local off = tonumber(oh) * 3600 + tonumber(om) * 60
-					epoch = epoch - (sign == "+" and off or -off)
-				end
-			end
-			if not epoch or epoch <= t then
-				return nil, nil
-			end
-		end
-	end
-	local rawjson = b64decode(e.payload)
-	if not rawjson then
-		return nil, nil
-	end
-	local ok, cs = pcall(function()
-		return require("luci.jsonc").parse(rawjson)
-	end)
-	if not ok or type(cs) ~= "table" or type(cs.results) ~= "table" then
-		return nil, nil
-	end
-	return cs.results, cs.at
-end
-
--- 端点白名单：只认缓存里出现过的 ip:port。pin/收藏都从这里过一遍，
--- 避免有人借 CSRF 写接口往 uci 里塞任意字符串（下游 run.sh 会拼命令行）。
-local function cached_endpoints()
-	local c = cursor()
-	local proto = c:get("ace", "main", "proto") or "awg"
-	local fam = (c:get("ace", "main", "ipv6") == "1") and "v6" or "v4"
-	local results = scan_results_for(proto, fam) or {}
-	-- masque 系协议没有端点缓存，回退看看 wg/awg 的（节点列表仍有用）
-	if #results == 0 and proto:match("^masque") then
-		results = scan_results_for("awg", fam) or scan_results_for("wg", fam) or {}
-	end
-	local set = {}
-	for _, r in ipairs(results) do
-		if type(r.endpoint) == "string" and r.endpoint:match("^[%w%.:%[%]%-]+$") then
-			set[r.endpoint] = true
-		end
-	end
-	return results, set, proto
-end
-
--- state.json 是引擎唯一的对外状态；解析失败时退化成按行提取，
--- 保证界面上永远是"未知"而不是报错白屏。
 local function read_state()
 	local raw = fs.readfile("/etc/ace/state.json")
 	if not raw or raw == "" then
@@ -253,6 +134,49 @@ local function parse_rfc3339(s)
 	return t
 end
 
+-- ---------------------------------------------------------------- 内核
+-- 引擎的查找顺序：uci 指定路径 → /etc/ace/core/mihomo → 下载（内嵌 SHA256 校验）。
+-- 界面照这个顺序判断，避免「界面说就绪、引擎却找不到」。
+local CORE_DIR = "/etc/ace/core"
+local CORE_FLAG = "/var/run/ace-core-installing"
+local CORE_LOG = "/var/log/ace-core.log"
+
+-- 是否是一个可执行文件：返回字节数，不是就返回 nil。
+-- 不能用 st.mode 判断——这台 ImmortalWrt 的 nixio 精简编译里 stat().mode 是 nil
+-- （真机实测），只能靠 fs.access(p, "x") 问系统。
+local function is_exe(p)
+	if not p or p == "" then
+		return nil
+	end
+	local st = fs.stat(p)
+	if not st or st.type ~= "reg" then
+		return nil
+	end
+	if not fs.access(p, "x") then
+		return nil
+	end
+	return st.size or 0
+end
+
+local function core_state()
+	local c = cursor()
+	local want = c:get("ace", "main", "core") or ""
+	-- run.sh 在 core 为空时用 /usr/bin/mihomo，这里保持同一套默认
+	if want == "" then
+		want = "/usr/bin/mihomo"
+	end
+	local sz = is_exe(want)
+	if sz then
+		return { ok = true, path = want, src = "system", size = sz }
+	end
+	local dl = CORE_DIR .. "/mihomo"
+	sz = is_exe(dl)
+	if sz then
+		return { ok = true, path = dl, src = "downloaded", size = sz }
+	end
+	return { ok = false, path = dl, src = "none", size = 0, want = want }
+end
+
 function api_status()
 	local st = read_state() or {}
 	local running = st.connected and pid_alive(st.core_pid)
@@ -316,11 +240,13 @@ function api_status()
 		end
 	end
 
-	-- 出口选择（节点页「设为默认」写入）与后台扫描标记
-	out.pick = cursor():get("ace", "main", "pick") or ""
-	out.scanning = fs.access(SCAN_FLAG) and true or false
-	if out.scanning then
-		out.scan_proto = (fs.readfile(SCAN_FLAG) or ""):match("^([%w%-]+)") or ""
+	-- 内核状态：引擎的查找顺序是「uci 里指定的路径 → /etc/ace/core/mihomo → 下载」，
+	-- 界面按同样顺序判断，才不会出现「界面说就绪、引擎却找不到」。
+	out.core = core_state()
+	out.core_installing = fs.access(CORE_FLAG) and true or false
+	-- 失败原因（下载不通、校验不过）直接给一行，别让人对着转圈猜
+	if out.core_installing or not out.core.ok then
+		out.core_log = (sys.exec("tail -n 1 " .. CORE_LOG .. " 2>/dev/null") or ""):gsub("%s+$", "")
 	end
 
 	-- 会话时长由前端算不划算：这里直接给秒数
@@ -419,9 +345,7 @@ local function core_ok(path)
 	end
 	for _, p in ipairs({ "/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/etc/ace/core/" }) do
 		if path:sub(1, #p) == p then
-			local st = fs.stat(path)
-			-- mode 形如 "rwxr-xr-x"，任意执行位为真即可
-			return st ~= nil and (st.type == "reg") and (st.mode or ""):find("x", 1, true) ~= nil
+			return is_exe(path) ~= nil
 		end
 	end
 	return false
@@ -465,7 +389,8 @@ function api_save()
 			elseif kind == "waction" then
 				ok = (v == "reboot" or v == "none")
 			elseif kind == "core" then
-				ok = core_ok(v)
+				-- 空 = 用 run.sh 的默认 /usr/bin/mihomo（界面上写的就是「留空则用」）
+				ok = (v == "") or core_ok(v)
 			end
 			if not ok then
 				errs[#errs + 1] = k
@@ -507,136 +432,34 @@ function api_save()
 	http.write_json({ ok = true, saved = pending_vals })
 end
 
--- ---------------------------------------------------------------- 节点页
--- 节点列表 = 引擎扫描缓存（/etc/ace/cache.json）+ uci 里的收藏/出口选择。
-function api_nodes()
-	local c = cursor()
-	local results, at, proto = cached_endpoints()
-	local starred = {}
-	local raw_starred = c:get("ace", "main", "starred")
-	if type(raw_starred) == "table" then
-		for _, s in ipairs(raw_starred) do
-			starred[s] = true
-		end
-	end
-	local out = {
-		proto = proto,
-		at = type(at) == "string" and at or "",
-		results = results,
-		starred = starred,
-		pick = c:get("ace", "main", "pick") or "",
-		scanning = fs.access(SCAN_FLAG) and true or false,
-		scan_proto = "",
-	}
-	if out.scanning then
-		out.scan_proto = (fs.readfile(SCAN_FLAG) or ""):match("^([%w%-]+)") or ""
-	end
-	http.prepare_content("application/json")
-	http.write_json(out)
-end
-
--- 后台触发一次端点扫描。扫描要几分钟，放后台跑，完成与否靠轮询
--- api_nodes.scanning（标记文件由后台 shell 收尾时删除）。
-function api_scan()
+-- ---------------------------------------------------------------- 内核下载
+-- 引擎自带 mihomo 下载：官方源 + 镜像，每个候选都过内嵌 SHA256（v1.19.32），
+-- 校验不过直接拒绝，所以这里不需要再拼一套下载脚本。
+-- 下载约 15 MB，放后台跑，界面轮询 api_status 的 core_installing。
+function api_core()
 	if not csrf_ok() then
 		return csrf_deny()
 	end
-	if fs.access(SCAN_FLAG) then
-		http.status(409, "Busy")
-		http.prepare_content("application/json")
-		http.write_json({ ok = false, error = "busy" })
-		return
-	end
 
-	local proto = http.formvalue("proto") or ""
-	if proto == "" then
-		proto = cursor():get("ace", "main", "proto") or "awg"
-	end
-	-- 只有 wg/awg/wwarp 有端点可扫；masque 没有端点缓存，扫了也白扫
-	if not ({ wg = true, awg = true, wwarp = true })[proto] then
+	if (http.formvalue("action") or "") ~= "install" then
 		http.status(400, "Bad Request")
 		http.prepare_content("application/json")
-		http.write_json({ ok = false, error = "proto " .. proto .. " has no endpoint cache" })
+		http.write_json({ ok = false, error = "unknown action" })
 		return
 	end
-	local fam = (cursor():get("ace", "main", "ipv6") == "1") and " -6" or ""
 
-	-- 标记文件内容写协议名，界面能显示「正在扫描 awg…」；后台 shell 收尾删标记。
-	-- -account 必须给绝对路径：scan 子命令的账号文件默认是相对当前目录的
-	-- ace-account.json（真机实测从 LuCI 触发时工作目录不对，报 no WARP account）。
-	fs.writefile(SCAN_FLAG, proto .. "\n")
-	sys.call("( WARP_CLIENT_HOME=/etc/ace /usr/bin/ace-engine scan -proto " .. shq(proto) ..
-		fam .. " -account /etc/ace/ace-account.json -plain -no-report >>/var/log/ace-scan.log 2>&1; " ..
-		"rm -f " .. shq(SCAN_FLAG) .. " ) >/dev/null 2>&1 &")
-	http.prepare_content("application/json")
-	http.write_json({ ok = true, proto = proto })
-end
-
--- 设为默认出口（pick）/收藏（star）/取消收藏（unstar）。只落盘不重启：
--- pick 影响下一次连接；apply=1 表示顺带重建隧道（前端在已连接时才发）。
-function api_pick()
-	if not csrf_ok() then
-		return csrf_deny()
-	end
-	local pick = http.formvalue("pick")
-	local star = http.formvalue("star")
-	local unstar = http.formvalue("unstar")
-	if pick == nil and star == nil and unstar == nil then
-		http.status(400, "Bad Request")
+	if fs.access(CORE_FLAG) then
 		http.prepare_content("application/json")
-		http.write_json({ ok = false, error = "nothing to do" })
+		http.write_json({ ok = true, installing = true })
 		return
 	end
 
-	local _, valid = cached_endpoints()
-	local function known(v)
-		return v == "" or (valid and valid[v] == true)
-	end
+	-- 标记先落盘再起进程，否则界面第一次轮询会看不到进度
+	fs.writefile(CORE_FLAG, "1\n")
+	sys.call(": > " .. CORE_LOG .. "; ( WARP_CLIENT_HOME=/etc/ace /usr/bin/ace-engine core -dir " ..
+		CORE_DIR .. " -force >>" .. CORE_LOG ..
+		" 2>&1; rm -f " .. CORE_FLAG .. " ) >/dev/null 2>&1 &")
 
-	local c = cursor()
-	if pick ~= nil then
-		pick = pick:match("^%s*(.-)%s*$")
-		if not known(pick) then
-			http.status(400, "Bad Request")
-			http.prepare_content("application/json")
-			http.write_json({ ok = false, error = "unknown endpoint" })
-			return
-		end
-		-- set 只改内存，必须 commit 才落盘（真机实测：不 commit 的话 init.d
-		-- 下次读到的还是旧 pick，节点页显示已选、连接却走老端点）
-		sys.call("uci -q set ace.main.pick=" .. shq(pick) .. "; uci -q commit ace")
-	end
-
-	if star ~= nil or unstar ~= nil then
-		local raw = c:get("ace", "main", "starred")
-		local list = {}
-		if type(raw) == "table" then
-			for _, s in ipairs(raw) do
-				list[s] = true
-			end
-		end
-		local target, want = (star ~= nil) and star or unstar, (star ~= nil)
-		if not known(target) then
-			http.status(400, "Bad Request")
-			http.prepare_content("application/json")
-			http.write_json({ ok = false, error = "unknown endpoint" })
-			return
-		end
-		list[target] = want or nil
-		-- 列表值用 shell 逐条 add_list 写（luci.model.uci 的列表 set 在
-		-- 24.10 上行为不稳，shell 的 uci add_list/delete 是确定性的）
-		local cmds = { "uci -q delete ace.main.starred" }
-		for s in pairs(list) do
-			cmds[#cmds + 1] = "uci add_list ace.main.starred=" .. shq(s)
-		end
-		cmds[#cmds + 1] = "uci -q commit ace"
-		sys.call(table.concat(cmds, "; "))
-	end
-
-	if http.formvalue("apply") == "1" then
-		-- 已连接时换出口：同步重建（与 api_action 的 start/stop 同级耗时）
-		sys.call("/etc/init.d/ace restart >/dev/null 2>&1")
-	end
 	http.prepare_content("application/json")
-	http.write_json({ ok = true })
+	http.write_json({ ok = true, installing = true })
 end

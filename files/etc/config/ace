@@ -9,11 +9,8 @@ config ace 'main'
 	option openvpn '0'
 	option openvpn_region ''
 
-	# 出口端点（节点页「设为默认」写入，ip:port）。空 = 引擎自动挑最优
+	# 出口端点（ip:port）。空 = 引擎自动挑最优
 	option pick ''
-
-	# 收藏的出口端点列表（节点页星标），仅用于界面筛选
-	list starred ''
 
 	# 本机混合代理端口（HTTP+SOCKS5），路由器上一般不用，留作旁路调试
 	option mixed_port '7890'

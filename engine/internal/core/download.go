@@ -159,26 +159,35 @@ func downloadRelease(workDir string) error {
 		expect = ""
 	}
 
+	fmt.Fprintf(os.Stderr, "core: mihomo %s not found in %s, downloading %s (%d source(s))\n",
+		defaultVersion, workDir, assetName, len(urls))
+
 	var lastErr error
 	for _, u := range urls {
+		// 界面把 stderr 收进日志，用户在「下载内核」时能看到卡在哪个源
+		fmt.Fprintf(os.Stderr, "core: fetching %s\n", u)
 		resp, err := client.Get(u)
 		if err != nil {
 			lastErr = err
+			fmt.Fprintf(os.Stderr, "core:   failed: %v\n", err)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("core: download %s: HTTP %d", u, resp.StatusCode)
+			fmt.Fprintf(os.Stderr, "core:   failed: HTTP %d\n", resp.StatusCode)
 			continue
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 512<<20))
 		resp.Body.Close()
 		if err != nil {
 			lastErr = err
+			fmt.Fprintf(os.Stderr, "core:   failed: %v\n", err)
 			continue
 		}
 		if len(data) < 1024 {
 			lastErr = fmt.Errorf("core: download %s: too small (%d bytes)", u, len(data))
+			fmt.Fprintf(os.Stderr, "core:   failed: too small (%d bytes)\n", len(data))
 			continue
 		}
 		if expect != "" {
@@ -186,13 +195,17 @@ func downloadRelease(workDir string) error {
 			got := hex.EncodeToString(sum[:])
 			if subtle.ConstantTimeCompare([]byte(got), []byte(expect)) != 1 {
 				lastErr = fmt.Errorf("core: download %s: SHA256 mismatch (got %s…, want %s…), refusing to install", u, got[:12], expect[:12])
+				fmt.Fprintf(os.Stderr, "core:   failed: SHA256 mismatch, refusing to install\n")
 				continue
 			}
+			fmt.Fprintf(os.Stderr, "core:   sha256 ok (%s…)\n", got[:12])
 		}
 		if err := unpackArchive(data, workDir); err != nil {
 			lastErr = err
+			fmt.Fprintf(os.Stderr, "core:   unpack failed: %v\n", err)
 			continue
 		}
+		fmt.Fprintf(os.Stderr, "core: installed %s (%d bytes from archive)\n", filepath.Join(workDir, ExeName()), len(data))
 		return nil
 	}
 	if lastErr == nil {
