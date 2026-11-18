@@ -1,0 +1,37 @@
+config ace 'main'
+	# 是否随系统启动（由 LuCI 的开关写入，init.d 用 rc.common 的 enabled 状态）
+	option enabled '0'
+
+	# 底层协议：awg（AmneziaWG）/ wg（WireGuard）/ masque
+	option proto 'awg'
+
+	# OpenVPN 出口：走 VPN Gate 节点，空 region 表示按延迟自动挑
+	option openvpn '0'
+	option openvpn_region ''
+
+	# 本机混合代理端口（HTTP+SOCKS5），路由器上一般不用，留作旁路调试
+	option mixed_port '7890'
+	option api_port '9090'
+
+	# 内核二进制；路由器上优先用系统已装的 mihomo
+	option core '/usr/bin/mihomo'
+
+	# 是否用 TUN 接管整屋流量。首次调试先留 0：不带 TUN 时只起一个本地
+	# 混合端口（可用 curl -x 验证引擎能否连上出口），路由器网络完全不受影响；
+	# 确认引擎正常后再打开，出问题也只是这个服务本身，不会拖垮局域网。
+	option tun '0'
+
+	# 接管 dnsmasq 上游到内核解析器（仅在 tun=1 时生效）
+	option dns_takeover '1'
+
+	# 内核解析器跟随规则走隧道（respect-rules）。不开的话内核直连明文
+	# DNS 上游，被墙域名会拿到污染结果（实测 youtube/google 解析到
+	# Facebook IP，流量明明走隧道也打不开）。仅在 tun=1 时生效。
+	option dns_leak '1'
+
+	# LAN 失联自愈：TUN 起来后若 br-lan 载波丢失（出现过一次内核/驱动把
+	# 交换芯片搞哑、必须人工断电的情况），连续三次后自动 reboot 恢复。
+	option lan_watchdog '1'
+
+	# 是否使用 IPv6 端点池
+	option ipv6 '0'

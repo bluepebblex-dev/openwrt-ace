@@ -1,0 +1,22 @@
+#!/usr/bin/expect -f
+# 上传一个文件到路由器。密码从环境变量 ACE_SSH_PASS 读取（不落盘），
+# 路由器地址用 ACE_HOST 覆盖，默认 192.168.1.1。
+# 用法：ACE_SSH_PASS=xxx ACE_HOST=192.168.1.1 ./oscp.exp 本地路径 /tmp/目标路径
+set timeout 300
+set src [lindex $argv 0]
+set dst [lindex $argv 1]
+log_user 0
+if {![info exists env(ACE_SSH_PASS)]} {
+    puts stderr "错误：请先 export ACE_SSH_PASS=你的路由器密码"
+    exit 1
+}
+set pass $env(ACE_SSH_PASS)
+set host [expr {[info exists env(ACE_HOST)] ? $env(ACE_HOST) : "192.168.1.1"}]
+spawn scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no $src root@$host:$dst
+expect {
+    -re "(?i)password:" { send "$pass\r"; exp_continue }
+    -re "(?i)yes/no" { send "yes\r"; exp_continue }
+    eof
+}
+log_user 1
+puts $expect_out(buffer)

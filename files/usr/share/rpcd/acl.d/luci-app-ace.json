@@ -1,0 +1,11 @@
+{
+	"luci-app-ace": {
+		"description": "Grant access to the ACE configuration",
+		"read": {
+			"uci": [ "ace" ]
+		},
+		"write": {
+			"uci": [ "ace" ]
+		}
+	}
+}

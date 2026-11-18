@@ -1,0 +1,296 @@
+#!/bin/sh /etc/rc.common
+# ACE —— WARP/AmneziaWG 客户端在 OpenWrt 上的服务封装。
+#
+# 设计要点（都是在真机上踩过的坑）：
+#   * 引擎自己就是长驻进程（connect 不返回，直到断开），所以交给 procd 看护，
+#     崩溃自动拉起，停止时先喊一声 disconnect 再杀，避免残留内核占端口。
+#   * TUN 模式不碰 dnsmasq 的 53 端口：内核的解析器听 127.0.0.1:7874，dnsmasq
+#     被指到那里。这样隧道没起来时，局域网照常解析，不会整屋断网。
+#   * 防火墙用独立 zone（ace0 + masq），由隧道就绪后动态添加，断开时移除。
+
+START=99
+STOP=10
+USE_PROCD=1
+
+ACE_HOME=/etc/ace
+ACE_BIN=/usr/bin/ace-engine
+ACE_STATE=$ACE_HOME/state.json
+ACE_LOG=/var/log/ace.log
+DNS_BAK=$ACE_HOME/dns.bak
+TUN_DEV=ace0
+DNS_PORT=7874
+WATCH_FLAG=/var/run/ace-watchdog
+WATCH_LOG=/var/log/ace-watchdog.log
+ACE_LOCK=/var/run/.ace.lock
+ACE_PENDING=/var/run/ace.pending
+
+. /lib/functions.sh
+
+cfg_get() { uci -q get "ace.main.$1"; }
+
+is_on() { [ "$(cfg_get "$1")" = "1" ]; }
+
+# start/stop 串行化:LuCI 连点、轮询重试或 procd 重入会让多个实例并发跑
+# dnsmasq restart + uci commit,多个进程抢 /var/run/uci.lock 会互锁、越堆越卡
+# (真机实测堆 7 个 stop 就卡到 40s 不返回,点「断开」的 HTTP 一直挂着)。
+# 用 mkdir 原子锁(不依赖 util-linux 的 flock 命令,OpenWrt base 未必带):
+# mkdir 要么成功要么不存在,天然互斥;锁目录里记持有者 pid,进程崩了可识别过期锁。
+take_lock() {
+	local tries=50 pid
+	# 过期锁:持有者已死(/proc/<pid> 没了)就清掉抢,避免一次崩溃锁死服务
+	while [ -d "$ACE_LOCK" ]; do
+		pid=$(cat "$ACE_LOCK/pid" 2>/dev/null)
+		if [ -n "$pid" ] && [ ! -d "/proc/$pid" ]; then
+			rm -f "$ACE_LOCK/pid" 2>/dev/null
+			rmdir "$ACE_LOCK" 2>/dev/null
+			continue
+		fi
+		tries=$((tries-1))
+		[ $tries -le 0 ] && {
+			logger -t ace "ace: 另一个 start/stop 正在进行,本次跳过"
+			return 1
+		}
+		sleep 0.5
+	done
+	mkdir "$ACE_LOCK" 2>/dev/null || return 1
+	echo $$ > "$ACE_LOCK/pid" 2>/dev/null
+	return 0
+}
+
+drop_lock() {
+	rm -f "$ACE_LOCK/pid" 2>/dev/null
+	rmdir "$ACE_LOCK" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- DNS 接管
+# dnsmasq 的上游改指向内核解析器。备份只做一次，且记下 noresolv 的原值——
+# 用户的 dnsmasq 可能本来就有自定义上游，断开时必须原样还回去。
+dns_backup() {
+	[ -f "$DNS_BAK" ] && return 0
+	{
+		printf 'noresolv=%s\n' "$(uci -q get dhcp.@dnsmasq[0].noresolv)"
+		uci -q get dhcp.@dnsmasq[0].server | while read -r s; do
+			[ -n "$s" ] && printf 'server=%s\n' "$s"
+		done
+		# 记录原解析器地址，还原时用来核对
+		printf 'resolv=%s\n' "$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf 2>/dev/null)"
+	} > "$DNS_BAK"
+}
+
+dns_apply() {
+	dns_backup
+	uci -q delete dhcp.@dnsmasq[0].server
+	uci -q add_list dhcp.@dnsmasq[0].server="127.0.0.1#$DNS_PORT"
+	uci -q set dhcp.@dnsmasq[0].noresolv=1
+	uci -q commit dhcp
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	logger -t ace "dnsmasq 上游已指向 127.0.0.1#$DNS_PORT"
+}
+
+dns_restore() {
+	[ -f "$DNS_BAK" ] || return 0
+	local noresolv="" servers=""
+	while IFS='=' read -r k v; do
+		case "$k" in
+			noresolv) noresolv="$v" ;;
+			server) servers="$servers $v" ;;
+		esac
+	done < "$DNS_BAK"
+
+	uci -q delete dhcp.@dnsmasq[0].server
+	for s in $servers; do
+		uci -q add_list dhcp.@dnsmasq[0].server="$s"
+	done
+	if [ -n "$noresolv" ]; then
+		uci -q set dhcp.@dnsmasq[0].noresolv="$noresolv"
+	else
+		uci -q delete dhcp.@dnsmasq[0].noresolv
+	fi
+	uci -q commit dhcp
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	rm -f "$DNS_BAK"
+	logger -t ace "dnsmasq 上游已还原"
+}
+
+# ---------------------------------------------------------------- 防火墙
+# fw4 的 zone 是唯一既能放行 forward 又能做 masquerade 的地方；用 include 往
+# chain 里塞规则会和 fw4 自己的链顺序打架。
+fw_zone_add() {
+	uci -q get firewall.ace >/dev/null 2>&1 && return 0
+	uci set firewall.ace=zone
+	uci set firewall.ace.name='ace'
+	uci set firewall.ace.device="$TUN_DEV"
+	uci set firewall.ace.input='ACCEPT'
+	uci set firewall.ace.output='ACCEPT'
+	uci set firewall.ace.forward='ACCEPT'
+	uci set firewall.ace.masq='1'
+	uci set firewall.ace.mtu_fix='1'
+
+	uci add firewall forwarding >/dev/null
+	uci set firewall.@forwarding[-1].src='lan'
+	uci set firewall.@forwarding[-1].dest='ace'
+
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+	logger -t ace "已添加防火墙 zone（$TUN_DEV，masq）"
+}
+
+fw_zone_del() {
+	uci -q get firewall.ace >/dev/null 2>&1 || return 0
+	uci delete firewall.ace
+	# 删掉指向 ace 的 forwarding，只动我们自己加的那条
+	local i=0 n
+	n=$(uci show firewall 2>/dev/null | grep -c '^firewall\.@forwarding\[')
+	while [ "$i" -lt "$n" ]; do
+		if [ "$(uci -q get firewall.@forwarding[$i].dest)" = "ace" ]; then
+			uci delete "firewall.@forwarding[$i]" 2>/dev/null
+			break
+		fi
+		i=$((i + 1))
+	done
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1
+	logger -t ace "已移除防火墙 zone"
+}
+
+# ---------------------------------------------------------------- 失联自愈
+# 踩过的坑：真机上跑 tun 之后，Mac 侧 en0 直接没载波，路由器 IP 不可达，
+# WAN 却还活着——交换芯片/驱动挂了，用户进程完全正常，只能人工断电。
+# 这个看门狗就是替人拔电源：LAN 曾经通、之后连续三次读不到载波，就 reboot。
+# 只在「通->断」时触发，不会因为开机时没插网线就重启。
+lan_watchdog() {
+	local seen=0 bad=0 c
+	logger -t ace "LAN 看门狗已启动（br-lan 载波监测）"
+	while sleep 20; do
+		[ -f "$WATCH_FLAG" ] || { logger -t ace "LAN 看门狗退出"; return 0; }
+		c=$(cat /sys/class/net/br-lan/carrier 2>/dev/null)
+		[ -z "$c" ] && continue
+		if [ "$c" = "1" ]; then
+			seen=1; bad=0; continue
+		fi
+		[ "$seen" = "1" ] || continue
+		bad=$((bad + 1))
+		logger -t ace "br-lan 载波丢失（第 $bad 次）"
+		if [ "$bad" -ge 3 ]; then
+			echo "[$(date '+%F %T')] br-lan 载波连续丢失，重启路由器自愈" >> "$WATCH_LOG"
+			logger -t ace "br-lan 载波连续丢失，重启路由器自愈"
+			sync
+			reboot
+		fi
+	done
+}
+
+# ---------------------------------------------------------------- 就绪钩子
+# connect 是长跑进程，procd 起来就返回了。隧道真正可用的时刻只能等：
+# tun 设备出现 + 内核解析器在听，之后才有必要改 dnsmasq 和防火墙。
+post_up() {
+	local i=0
+	while [ "$i" -lt 180 ]; do
+		if ip link show "$TUN_DEV" >/dev/null 2>&1; then
+			# 解析器起来后再改 dnsmasq，避免改完的那几秒整屋查不到域名
+			local j=0
+			while [ "$j" -lt 40 ]; do
+				if netstat -ln 2>/dev/null | grep -q "127.0.0.1:$DNS_PORT "; then
+					break
+				fi
+				j=$((j + 1)); sleep 0.5
+			done
+			is_on dns_takeover && dns_apply
+			fw_zone_add
+			# 流表里已有的连接还走老路由，清掉让它们重新选路
+			command -v conntrack >/dev/null 2>&1 && conntrack -F >/dev/null 2>&1
+			logger -t ace "隧道就绪：$TUN_DEV 已建立"
+
+			# 死手开关：隧道起来了但确实不通时，宁可自己断开也不要让整屋
+			# 挂在一个"显示已连接"的假象上。三次机会，每次间隔 15 秒。
+			local k=0
+			while [ "$k" -lt 3 ]; do
+				if wget -q -T 8 -O /dev/null https://www.gstatic.com/generate_204 2>/dev/null \
+					|| wget -q -T 8 -O /dev/null http://www.gstatic.com/generate_204 2>/dev/null; then
+					logger -t ace "出口可用，会话保持"
+				if [ "$(cfg_get lan_watchdog)" != "0" ]; then
+					( lan_watchdog ) 1000>&- &
+				fi
+					return 0
+				fi
+				k=$((k + 1)); sleep 15
+			done
+			logger -t ace "隧道建立后仍不可达，自动断开以免影响局域网"
+			echo "[$(date '+%F %T')] 自检失败：隧道不可达，自动断开" >> /var/log/ace.log
+			/etc/init.d/ace stop
+			return 1
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+	logger -t ace "180 秒内未等到 $TUN_DEV，放弃接管"
+	return 1
+}
+
+# ---------------------------------------------------------------- 服务主体
+start_service() {
+	take_lock || return 0
+	# 告诉界面「正在朝 up 走」,api_status 据此显示处理中(隧道还在后台建时尤其有用)
+	echo up > "$ACE_PENDING" 2>/dev/null
+	config_load ace
+	mkdir -p "$ACE_HOME" /var/log
+
+	local proto ovpn region mport aport core
+	proto=$(cfg_get proto); proto=${proto:-awg}
+	mport=$(cfg_get mixed_port); mport=${mport:-7890}
+	aport=$(cfg_get api_port); aport=${aport:-9090}
+	core=$(cfg_get core); core=${core:-/usr/bin/mihomo}
+
+	# 上一轮如果没清干净，先收一遍，否则内核抢不到端口
+	[ -x "$ACE_BIN" ] && "$ACE_BIN" disconnect -mixed-port "$mport" -core "$core" >/dev/null 2>&1
+
+	procd_open_instance ace
+	procd_set_param command /usr/share/ace/run.sh
+	procd_set_param env WARP_CLIENT_HOME="$ACE_HOME" ACE_DNS_PORT="$DNS_PORT" \
+		ACE_LAN_BYPASS="1"
+	procd_set_param respawn 3600 5 0
+	procd_set_param term_timeout 25
+	procd_set_param stdout 0
+	procd_set_param stderr 0
+	procd_close_instance
+
+	# 就绪钩子只在 TUN 模式下有意义（没有 TUN 就没有要接管的东西）。
+	# 关键:先 drop_lock 再 fork——post_up 是后台长跑(等隧道+探活,几十秒),
+	# 若继承锁 fd 会一直占着,它内部失败时调 stop 就拿不到锁死等 25s。
+	# 本函数的同步部分(disconnect+procd 配置)到此已跑完,锁该还了。
+	# pending 标记保留到隧道真正就绪/连接断开才清——它要覆盖整个 post_up 期间。
+	if [ "$(cfg_get tun)" = "1" ]; then
+		: > "$WATCH_FLAG"
+	fi
+	drop_lock
+	if [ "$(cfg_get tun)" = "1" ]; then
+		# 1000>&- 同样必须做:rc.common 在 source procd.sh 时就调 procd_lock,
+		# 在脚本 shell 里打开 fd 1000 持有 /var/lock/procd_ace.lock 的 flock。
+		# post_up 是后台长跑,若继承这个 fd,procd 的锁就永远放不掉——之后所有
+		# init.d 动作(含 LuCI 的启动/停止按钮)都会在 procd_lock 里永久阻塞
+		# (真机实测 13:45 启动的看门狗 shell 占锁 4 小时,期间 status/enabled
+		# 全部挂死)。这里连同 lan_watchdog 一起显式关闭 fd 1000。
+		( post_up ) 1000>&- &
+	fi
+}
+
+stop_service() {
+	take_lock || return 0
+	local mport core
+	mport=$(cfg_get mixed_port); mport=${mport:-7890}
+	core=$(cfg_get core); core=${core:-/usr/bin/mihomo}
+
+	# 先正常断开：停内核、清端口、还原系统状态
+	[ -x "$ACE_BIN" ] && "$ACE_BIN" disconnect -mixed-port "$mport" -core "$core" >/dev/null 2>&1
+
+	# 内核被强杀时 disconnect 可能没跑完收尾，这里补齐
+	is_on dns_takeover && dns_restore
+	fw_zone_del
+	rm -f "$WATCH_FLAG"
+	drop_lock
+	logger -t ace "服务已停止"
+}
+
+service_triggers() {
+	procd_add_reload_trigger ace
+}

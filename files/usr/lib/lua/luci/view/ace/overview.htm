@@ -1,0 +1,197 @@
+<%+header%>
+
+<style type="text/css">
+	.ace-wrap { max-width: 880px; margin: 0 auto; }
+	.ace-hero {
+		position: relative; border-radius: 16px; padding: 26px 22px 22px;
+		background: linear-gradient(150deg, #243b55 0%, #141e30 100%);
+		color: #eaf0f7; box-shadow: 0 10px 30px rgba(0,0,0,.18);
+		display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+	}
+	.ace-hero.on { background: linear-gradient(150deg, #14532d 0%, #0b2d1c 100%); }
+	.ace-hero.busy { background: linear-gradient(150deg, #4a3b0d 0%, #2a2107 100%); }
+	.ace-knob {
+		width: 104px; height: 104px; border-radius: 50%; border: 0; cursor: pointer;
+		background: rgba(255,255,255,.10); color: #fff; flex: 0 0 auto;
+		display: flex; flex-direction: column; align-items: center; justify-content: center;
+		transition: transform .12s ease, background .2s ease;
+		font-size: 13px; line-height: 1.35;
+	}
+	.ace-knob:hover { background: rgba(255,255,255,.18); transform: scale(1.03); }
+	.ace-knob:active { transform: scale(.97); }
+	.ace-knob.busy { cursor: progress; opacity: .85; }
+	.ace-knob .big { font-size: 15px; font-weight: 600; letter-spacing: .5px; }
+	.ace-meta { flex: 1 1 300px; min-width: 240px; }
+	.ace-title { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+	.ace-sub { font-size: 12.5px; opacity: .72; }
+	.ace-stat { display: flex; gap: 18px; margin-top: 14px; flex-wrap: wrap; }
+	.ace-stat div { font-size: 12px; opacity: .82; }
+	.ace-stat b { display: block; font-size: 15px; font-weight: 600; opacity: 1; margin-top: 2px; }
+
+	.ace-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-top: 16px; }
+	.ace-cell {
+		background: rgba(127,127,127,.08); border: 1px solid rgba(127,127,127,.16);
+		border-radius: 12px; padding: 12px 14px;
+	}
+	.ace-cell .k { font-size: 11.5px; opacity: .62; letter-spacing: .3px; }
+	.ace-cell .v { font-size: 15px; font-weight: 600; margin-top: 3px; word-break: break-all; }
+
+	.ace-log-head { display: flex; align-items: center; justify-content: space-between; margin: 20px 0 8px; }
+	.ace-log {
+		background: #0d1117; color: #c9d1d9; border-radius: 12px; padding: 12px 14px;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+		line-height: 1.55; height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+	}
+	.ace-actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
+	.ace-note { font-size: 12px; opacity: .68; margin-top: 10px; line-height: 1.6; }
+</style>
+
+<div class="ace-wrap">
+	<div class="ace-hero" id="hero">
+		<button class="ace-knob" id="knob" onclick="aceToggle()">
+			<span class="big" id="knobText">连接</span>
+			<span id="knobHint">点一下开始</span>
+		</button>
+		<div class="ace-meta">
+			<div class="ace-title" id="title">正在读取状态…</div>
+			<div class="ace-sub" id="subtitle">ACE · WARP / AmneziaWG</div>
+			<div class="ace-stat">
+				<div>出口 IP<b id="sIp">—</b></div>
+				<div>地区<b id="sCountry">—</b></div>
+				<div>延迟<b id="sLatency">—</b></div>
+				<div>已连接<b id="sUptime">—</b></div>
+			</div>
+		</div>
+	</div>
+
+	<div class="ace-grid">
+		<div class="ace-cell"><div class="k">协议</div><div class="v" id="cProto">—</div></div>
+		<div class="ace-cell"><div class="k">端点</div><div class="v" id="cEndpoint">—</div></div>
+		<div class="ace-cell"><div class="k">TUN 接口</div><div class="v" id="cTun">—</div></div>
+		<div class="ace-cell"><div class="k">出口类型</div><div class="v" id="cExit">—</div></div>
+	</div>
+
+	<div class="ace-log-head">
+		<strong style="font-size:13px">运行日志</strong>
+		<span>
+			<button class="btn cbi-button" onclick="aceLoadLog()">刷新</button>
+			<button class="btn cbi-button" onclick="aceClearLog()">清除日志</button>
+			<a class="btn cbi-button" href="<%=url('admin/services/ace/settings')%>">设置</a>
+		</span>
+	</div>
+	<div class="ace-log" id="log">（加载中…）</div>
+
+	<div class="ace-note">
+		连接后整个局域网的流量会经由 WARP 出口；DNS 由内核接管，断开时自动还原。
+		首次使用请先在「设置」里确认协议与出口地区。
+	</div>
+</div>
+
+<script type="text/javascript">
+var ACE_STATUS = '<%=url("admin/services/ace/api/status")%>';
+var ACE_ACTION = '<%=url("admin/services/ace/api/action")%>';
+var ACE_LOG = '<%=url("admin/services/ace/api/log")%>';
+var aceBusy = false;
+
+function aceFmtUptime(s) {
+	if (!s || s < 0) return '—';
+	var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+	if (h > 0) return h + ' 小时 ' + m + ' 分';
+	if (m > 0) return m + ' 分 ' + (s % 60) + ' 秒';
+	return s + ' 秒';
+}
+
+function aceRender(d) {
+	var hero = document.getElementById('hero');
+	var knob = document.getElementById('knob');
+	hero.className = 'ace-hero' + (aceBusy ? ' busy' : (d.connected ? ' on' : ''));
+
+	if (aceBusy) {
+		document.getElementById('knobText').textContent = '处理中';
+		document.getElementById('knobHint').textContent = '请稍候';
+		document.getElementById('title').textContent = '正在执行…';
+	} else if (d.connected) {
+		document.getElementById('knobText').textContent = '断开';
+		document.getElementById('knobHint').textContent = '点一下停止';
+		document.getElementById('title').textContent =
+			(d.city || d.country || '已连接') + (d.colo ? ' · ' + d.colo : '');
+		document.getElementById('subtitle').textContent = d.exit_ip ? ('出口 ' + d.exit_ip) : '隧道已建立';
+	} else {
+		document.getElementById('knobText').textContent = '连接';
+		document.getElementById('knobHint').textContent = '点一下开始';
+		document.getElementById('title').textContent = d.service ? '未连接' : '服务未运行';
+		document.getElementById('subtitle').textContent = d.service
+			? '点左侧圆钮开始建立隧道' : '连接按钮会自动拉起服务';
+	}
+
+	document.getElementById('sIp').textContent = d.exit_ip || '—';
+	document.getElementById('sCountry').textContent = d.country || '—';
+	document.getElementById('sLatency').textContent = d.latency ? (d.latency + ' ms') : '—';
+	document.getElementById('sUptime').textContent = d.connected ? aceFmtUptime(d.uptime) : '—';
+
+	document.getElementById('cProto').textContent = (d.proto || '—').toUpperCase();
+	document.getElementById('cEndpoint').textContent = d.endpoint || '—';
+	document.getElementById('cTun').textContent = d.tun_up ? 'ace0 已建立' : '未建立';
+	document.getElementById('cExit').textContent = d.openvpn
+		? ('OpenVPN ' + (d.openvpn_region || '自动')) : 'WARP 原生';
+}
+
+function acePoll() {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_STATUS + '?t=' + Date.now(), true);
+	x.onload = function () {
+		try { aceRender(JSON.parse(x.responseText)); } catch (e) {}
+	};
+	x.send();
+}
+
+function aceLoadLog() {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_LOG + '?t=' + Date.now(), true);
+	x.onload = function () {
+		var el = document.getElementById('log');
+		el.textContent = x.responseText || '（暂无日志）';
+		el.scrollTop = el.scrollHeight;
+	};
+	x.send();
+}
+
+function aceClearLog() {
+	if (!confirm('确定清除运行日志？清除后面板里只剩之后的输出。')) return;
+	var kv = document.querySelector('input[name="token"]');
+	var x = new XMLHttpRequest();
+	x.open('POST', ACE_ACTION, true);
+	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+	x.onloadend = function () {
+		var el = document.getElementById('log');
+		el.textContent = '（日志已清除）';
+		setTimeout(aceLoadLog, 400);
+	};
+	x.send('action=clearlog' + (kv ? '&token=' + encodeURIComponent(kv.value) : ''));
+}
+
+function aceToggle() {
+	if (aceBusy) return;
+	var connected = document.getElementById('hero').className.indexOf('on') >= 0;
+	aceBusy = true;
+	acePoll();
+
+	var body = 'action=' + (connected ? 'stop' : 'start');
+	var x = new XMLHttpRequest();
+	x.open('POST', ACE_ACTION, true);
+	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+	x.onloadend = function () {
+		aceBusy = false;
+		acePoll();
+		setTimeout(aceLoadLog, 600);
+	};
+	x.send(body);
+}
+
+acePoll();
+aceLoadLog();
+setInterval(acePoll, 2500);
+setInterval(aceLoadLog, 8000);
+</script>
+
+<%+footer%>

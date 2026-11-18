@@ -1,0 +1,209 @@
+<%+header%>
+
+<style type="text/css">
+	.ace-wrap { max-width: 880px; margin: 0 auto; }
+	.ace-card {
+		background: rgba(127,127,127,.07); border: 1px solid rgba(127,127,127,.16);
+		border-radius: 14px; padding: 16px 18px; margin-top: 14px;
+	}
+	.ace-card h3 { margin: 0 0 4px; font-size: 14px; }
+	.ace-card .hint { font-size: 11.5px; opacity: .62; margin: 0 0 12px; line-height: 1.6; }
+	.ace-row {
+		display: flex; align-items: center; gap: 14px; padding: 10px 0;
+		border-top: 1px solid rgba(127,127,127,.13); flex-wrap: wrap;
+	}
+	.ace-row:first-of-type { border-top: 0; }
+	.ace-row .lbl { flex: 0 0 190px; font-size: 12.5px; }
+	.ace-row .ctl { flex: 1 1 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+	.ace-row .sub { flex: 1 1 100%; font-size: 11.5px; opacity: .6; margin: 4px 0 0; line-height: 1.55; }
+	.ace-row input[type=text], .ace-row select { min-width: 220px; }
+	.ace-toggle { width: 18px; height: 18px; accent-color: #2f7d4f; }
+	.ace-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+	.ace-msg { font-size: 12.5px; }
+	.ace-msg.ok { color: #2f7d4f; }
+	.ace-msg.err { color: #b3261e; }
+	.ace-note { font-size: 12px; opacity: .68; margin-top: 14px; line-height: 1.7; }
+</style>
+
+<div class="ace-wrap">
+	<h2 name="content">ACE 设置</h2>
+	<div style="font-size:12px;opacity:.65;margin-bottom:6px">
+		WARP / AmneziaWG 客户端的运行参数。改动保存后服务会自动重启一次，隧道重建约需 10–20 秒。
+	</div>
+
+	<div class="ace-card">
+		<h3>连接</h3>
+		<p class="hint">决定这次连接怎么走，保存后立即生效。</p>
+
+		<div class="ace-row">
+			<div class="lbl">TUN 接管整屋流量</div>
+			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-tun"></div>
+			<p class="sub">关闭时只在路由器本机开一个混合代理端口（可用 curl -x 验证通路），局域网完全不受影响。建议第一次先关掉确认引擎能连上，再打开接管整屋。</p>
+		</div>
+
+		<div class="ace-row">
+			<div class="lbl">底层协议</div>
+			<div class="ctl">
+				<select class="cbi-input-select" id="f-proto">
+					<option value="awg">AmneziaWG（抗封锁最好）</option>
+					<option value="wg">WireGuard（更快）</option>
+					<option value="wwarp">WARP-in-WARP（双层链式）</option>
+					<option value="masque">MASQUE（HTTP/3/QUIC）</option>
+					<option value="masque-h2">MASQUE（HTTP/2/TCP 备用）</option>
+					<option value="masque-mm">MASQUE-in-MASQUE（嵌套）</option>
+				</select>
+			</div>
+		</div>
+
+		<div class="ace-row">
+			<div class="lbl">使用 OpenVPN 出口</div>
+			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-openvpn"></div>
+			<p class="sub">在 WARP 之上再套一层 VPN Gate 节点，出口国家更可控，速度略降。</p>
+		</div>
+
+		<div class="ace-row">
+			<div class="lbl">出口地区</div>
+			<div class="ctl"><input type="text" class="cbi-input-text" id="f-openvpn_region" placeholder="自动" maxlength="2" style="width:90px;min-width:90px;text-transform:uppercase"></div>
+			<p class="sub">两位国家代码，留空表示按延迟自动挑选。常用：JP、KR、TH、US、SG、TW、HK。仅在开启 OpenVPN 出口时生效。</p>
+		</div>
+
+		<div class="ace-row">
+			<div class="lbl">使用 IPv6 端点</div>
+			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-ipv6"></div>
+			<p class="sub">仅在当前网络 IPv6 可用时有意义。</p>
+		</div>
+
+		<div class="ace-row">
+			<div class="lbl">开机自启</div>
+			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-enabled"></div>
+		</div>
+	</div>
+
+	<div class="ace-card">
+		<h3>DNS 与转发</h3>
+		<p class="hint">三项都只在 TUN 开启时生效。</p>
+
+		<div class="ace-row">
+			<div class="lbl">接管局域网 DNS</div>
+			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-dns_takeover"></div>
+			<p class="sub">把 dnsmasq 的上游指向内核解析器，避免 DNS 泄漏与污染。断开时自动还原。</p>
+		</div>
+
+		<div class="ace-row">
+			<div class="lbl">解析走隧道</div>
+			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-dns_leak"></div>
+			<p class="sub">内核解析器的查询跟随规则经隧道发出（respect-rules）。关闭时内核从 WAN 直查明文上游，被墙域名会拿到污染结果（如 youtube / google 解析到不相干 IP），流量走隧道也无法打开。</p>
+		</div>
+
+		<div class="ace-row">
+			<div class="lbl">LAN 失联自愈</div>
+			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-lan_watchdog"></div>
+			<p class="sub">TUN 起来后若 br-lan 载波丢失（真机上出现过一次必须断电才能恢复的情况），连续三次读不到载波就自动重启，不必去拔电源。</p>
+		</div>
+	</div>
+
+	<div class="ace-card">
+		<h3>高级</h3>
+		<p class="hint">一般不用改。</p>
+
+		<div class="ace-row">
+			<div class="lbl">混合代理端口</div>
+			<div class="ctl"><input type="number" class="cbi-input-text" id="f-mixed_port" min="1" max="65535" style="width:110px;min-width:110px"></div>
+		</div>
+		<div class="ace-row">
+			<div class="lbl">控制接口端口</div>
+			<div class="ctl"><input type="number" class="cbi-input-text" id="f-api_port" min="1" max="65535" style="width:110px;min-width:110px"></div>
+		</div>
+		<div class="ace-row">
+			<div class="lbl">内核路径</div>
+			<div class="ctl"><input type="text" class="cbi-input-text" id="f-core" placeholder="/usr/bin/mihomo"></div>
+			<p class="sub">留空使用 /usr/bin/mihomo。自行替换内核时填绝对路径。</p>
+		</div>
+	</div>
+
+	<div class="ace-bar">
+		<button class="btn cbi-button cbi-button-apply" id="saveBtn" onclick="aceSave()">保存并重启服务</button>
+		<a class="btn cbi-button" href="<%=url('admin/services/ace')%>">返回状态页</a>
+		<span class="ace-msg" id="msg"></span>
+	</div>
+
+	<div class="ace-note">
+		连接建立后会自动创建 <code>ace0</code> 接口并把局域网流量导进去，同时在防火墙上添加 <code>ace</code> zone（含 masquerade）。
+		停止连接时这些都会被移除。<br>
+		如果打开「接管局域网 DNS」，<code>dnsmasq</code> 的上游会被临时改为 <code>127.0.0.1#7874</code>，断开时按备份原样还原。
+	</div>
+</div>
+
+<script type="text/javascript">
+var ACE_GET = '<%=url("admin/services/ace/api/settings")%>';
+var ACE_SAVE = '<%=url("admin/services/ace/api/save")%>';
+var ACE_FLAGS = ['tun', 'openvpn', 'ipv6', 'dns_takeover', 'dns_leak', 'lan_watchdog', 'enabled'];
+
+function aceMsg(t, cls) {
+	var m = document.getElementById('msg');
+	m.textContent = t;
+	m.className = 'ace-msg' + (cls ? ' ' + cls : '');
+}
+
+function aceFill(d) {
+	ACE_FLAGS.forEach(function (k) {
+		var el = document.getElementById('f-' + k);
+		if (el) el.checked = (d[k] === '1' || d[k] === 'true' || d[k] === 'on');
+	});
+	['proto', 'openvpn_region', 'mixed_port', 'api_port', 'core'].forEach(function (k) {
+		var el = document.getElementById('f-' + k);
+		if (el) el.value = d[k] || '';
+	});
+}
+
+function aceLoad() {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_GET + '?t=' + Date.now(), true);
+	x.onload = function () {
+		try { aceFill(JSON.parse(x.responseText)); }
+		catch (e) { aceMsg('读取配置失败：' + e, 'err'); }
+	};
+	x.onerror = function () { aceMsg('读取配置失败（网络错误）', 'err'); };
+	x.send();
+}
+
+function aceSave() {
+	var body = [];
+	ACE_FLAGS.forEach(function (k) {
+		var el = document.getElementById('f-' + k);
+		if (el) body.push(k + '=' + (el.checked ? '1' : '0'));
+	});
+	['proto', 'openvpn_region', 'mixed_port', 'api_port', 'core'].forEach(function (k) {
+		var el = document.getElementById('f-' + k);
+		if (el) body.push(k + '=' + encodeURIComponent(el.value));
+	});
+
+	var btn = document.getElementById('saveBtn');
+	btn.disabled = true;
+	aceMsg('正在保存…');
+	var x = new XMLHttpRequest();
+	x.open('POST', ACE_SAVE, true);
+	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+	x.onload = function () {
+		btn.disabled = false;
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) {}
+		if (x.status === 200 && d && d.ok) {
+			aceMsg('已保存，服务正在重启，约 10–20 秒后隧道恢复', 'ok');
+		} else if (d && d.invalid) {
+			aceMsg('这些项不合法：' + d.invalid.join('、'), 'err');
+		} else {
+			aceMsg('保存失败（HTTP ' + x.status + '）', 'err');
+		}
+	};
+	x.onerror = function () {
+		btn.disabled = false;
+		aceMsg('保存失败（网络错误）', 'err');
+	};
+	x.send(body.join('&'));
+}
+
+aceLoad();
+</script>
+
+<%+footer%>

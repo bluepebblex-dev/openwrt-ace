@@ -1,0 +1,21 @@
+#!/usr/bin/expect -f
+# 在路由器上执行一条命令。密码从环境变量 ACE_SSH_PASS 读取（不落盘），
+# 路由器地址用 ACE_HOST 覆盖，默认 192.168.1.1。
+# 用法：ACE_SSH_PASS=xxx ACE_HOST=192.168.1.1 ./osh.exp "命令"
+set timeout 60
+set cmd [lindex $argv 0]
+log_user 0
+if {![info exists env(ACE_SSH_PASS)]} {
+    puts stderr "错误：请先 export ACE_SSH_PASS=你的路由器密码"
+    exit 1
+}
+set pass $env(ACE_SSH_PASS)
+set host [expr {[info exists env(ACE_HOST)] ? $env(ACE_HOST) : "192.168.1.1"}]
+spawn ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o ConnectTimeout=10 root@$host $cmd
+expect {
+    -re "(?i)password:" { send "$pass\r"; exp_continue }
+    -re "(?i)yes/no" { send "yes\r"; exp_continue }
+    eof
+}
+log_user 1
+puts $expect_out(buffer)
