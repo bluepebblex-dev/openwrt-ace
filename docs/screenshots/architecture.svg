@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 240" width="1000" height="240" role="img" aria-label="ACE 数据路径：局域网 → br-lan → 防火墙 zone ace0 → ace0 TUN（mihomo）→ WARP → 互联网，DNS 由 dnsmasq 转发到 127.0.0.1:7874">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8c959f"/>
+    </marker>
+    <style>
+      .box { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.5; }
+      .t { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; font-size: 15px; font-weight: 600; fill: #1f2328; text-anchor: middle; }
+      .s { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; font-size: 12px; fill: #57606a; text-anchor: middle; }
+      .lbl { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; font-size: 11.5px; fill: #8c959f; text-anchor: middle; }
+      .line { stroke: #8c959f; stroke-width: 1.6; fill: none; marker-end: url(#arr); }
+      .dash { stroke: #8c959f; stroke-width: 1.4; fill: none; stroke-dasharray: 5 4; marker-end: url(#arr); }
+    </style>
+  </defs>
+
+  <g>
+    <rect class="box" x="16" y="40" width="150" height="62" rx="10"/>
+    <text class="t" x="91" y="68">局域网设备</text>
+    <text class="s" x="91" y="88">192.168.x.x</text>
+
+    <rect class="box" x="196" y="40" width="88" height="62" rx="10"/>
+    <text class="t" x="240" y="68">br-lan</text>
+    <text class="s" x="240" y="88">网关</text>
+
+    <rect class="box" x="314" y="40" width="160" height="62" rx="10"/>
+    <text class="t" x="394" y="68">防火墙 zone ace0</text>
+    <text class="s" x="394" y="88">forward + masq</text>
+
+    <rect class="box" x="504" y="40" width="170" height="62" rx="10"/>
+    <text class="t" x="589" y="68">ace0 TUN</text>
+    <text class="s" x="589" y="88">mihomo 内核</text>
+
+    <rect class="box" x="704" y="40" width="110" height="62" rx="10"/>
+    <text class="t" x="759" y="68">WARP</text>
+    <text class="s" x="759" y="88">awg / masque</text>
+
+    <rect class="box" x="844" y="40" width="140" height="62" rx="10"/>
+    <text class="t" x="914" y="68">互联网</text>
+    <text class="s" x="914" y="88">出口 IP</text>
+
+    <path class="line" d="M166,71 H190"/>
+    <path class="line" d="M284,71 H308"/>
+    <path class="line" d="M474,71 H498"/>
+    <path class="line" d="M674,71 H698"/>
+    <path class="line" d="M814,71 H838"/>
+
+    <rect class="box" x="360" y="152" width="210" height="62" rx="10"/>
+    <text class="t" x="465" y="180">dnsmasq 上游</text>
+    <text class="s" x="465" y="200">127.0.0.1:7874</text>
+
+    <path class="dash" d="M240,102 V183 H354"/>
+    <text class="lbl" x="268" y="132">DNS</text>
+    <path class="dash" d="M570,183 H589 V108"/>
+    <text class="lbl" x="616" y="132">跟随规则</text>
+  </g>
+</svg>

@@ -139,15 +139,7 @@ TUN 之后 LAN 侧设备直接失联、路由器 IP 不可达但 WAN 还活着�
 **为什么不是另写一套路由逻辑。** 引擎本身就是完整的客户端：注册 WARP 账号、扫端点、挑最优、渲染
 mihomo 配置、起内核、验数据面、守护会话。移植只需要补 Linux 侧的差异，不需要重写。
 
-```mermaid
-flowchart LR
-    LAN["局域网设备"] --> BR["br-lan<br/>192.168.x.1"]
-    BR --> FW["防火墙 zone ace0<br/>forward + masq"]
-    FW --> TUN["ace0 TUN<br/>mihomo 内核"]
-    TUN --> NET(("互联网"))
-    BR -.->|DNS| DNSD["dnsmasq<br/>upstream 127.0.0.1:7874"]
-    DNSD -.-> TUN
-```
+![数据路径：局域网 → br-lan → 防火墙 zone ace0 → ace0 TUN → WARP → 互联网](docs/screenshots/architecture.svg)
 
 **TUN 而不是 TPROXY。** 引擎渲染的 mihomo 配置本来就带 `tun.auto-route + auto-detect-interface +
 dns-hijack`，在 Linux 上是原生的；改用 TPROXY 要重做一整套 nft 规则，收益不明。
