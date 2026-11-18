@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -30,6 +31,14 @@ var connectStage func(string)
 func stageMsg(s string) {
 	if connectStage != nil {
 		connectStage(s)
+		return
+	}
+	// ACE_PROGRESS=1 makes the CLI/service path echo every stage to stderr
+	// (run.sh redirects that into /var/log/ace.log). A router has no GUI: with
+	// the callback unset the log panel showed nothing but the final error, so
+	// a slow or failing step was impossible to place.
+	if os.Getenv("ACE_PROGRESS") != "" {
+		fmt.Fprintln(os.Stderr, s)
 	}
 }
 
@@ -81,9 +90,19 @@ const (
 	// crawl; the connect loop rotates past up to openvpnSpeedRetries of them,
 	// then keeps the next working relay anyway because slow beats nothing.
 	// The floor sits far above the generic gate's ~11 KB/s, which this relay
-	// class was passing while delivering ~14 KB/s.
-	openvpnMinBps       = 150 * 1024
-	openvpnSpeedRetries = 2
+	// 32 KB/s on a router: the same relay class that measures 150 KB/s from a
+	// desktop lands at 6-40 KB/s here, because the free relay sits behind the
+	// WARP underlay and the CPU is an ARM SoC. 150 KB/s did not mean "slow" on
+	// this hardware, it meant "no relay ever qualifies".
+	openvpnMinBps = 32 * 1024
+	// openvpnSlowFloor is the floor for counting a timed-out transfer as slow
+	// rather than dead: below it the path accepts bytes but does not really
+	// move them (a relay that handshakes and stalls), and rotating is right.
+	openvpnSlowFloor = 4 * 1024
+	// One rotate before accepting a slow relay: candidates are already ordered
+	// by remembered speed and latency, so the head of the list is the best
+	// shot, and every extra rotation costs a core restart plus a 22s warm-up.
+	openvpnSpeedRetries = 1
 )
 
 // slowRelayError marks a relay that passed every data-plane check but measured
@@ -124,6 +143,14 @@ func runConnectCmd(ctx context.Context, opts options) error {
 		return ctx.Err()
 	}
 	if err != nil {
+		// A failed connect must not leave the LAN behind a tunnel nobody owns.
+		// adoptTun already stops its own core, but the device and the rules
+		// survive it (see teardownTunDevice). Only a TUN-mode session has any
+		// business deleting ace0 - the name is fixed, and a proxy-only run that
+		// failed must never touch the live service's device.
+		if opts.tunMode {
+			teardownTunDevice()
+		}
 		return err
 	}
 	if opts.hold {
@@ -455,7 +482,12 @@ func runConnectInner(ctx context.Context, opts options) error {
 				fmt.Fprintln(os.Stderr, errPal.warn("系统代理设置被拦截: "+state.ProxyWarn))
 				fmt.Fprintln(os.Stderr, errPal.warn(fmt.Sprintf("请手动把系统/浏览器代理指向 127.0.0.1:%d，或将本程序加入安全软件白名单后重连", opts.mixedPort)))
 			}
-			if opts.tunMode {
+			// Desktop only: macOS and Windows need elevation to create the
+			// device, so a TUN session without it is suspect. On Linux the
+			// device is already up by the time this line runs (adoptTun waits
+			// for it), and printing the warning there tells a router operator
+			// to go fix a permission problem that does not exist.
+			if opts.tunMode && runtime.GOOS != "linux" {
 				fmt.Fprintln(os.Stderr, errPal.warn("TUN mode requires running with administrator rights"))
 			}
 			// A CLI connect returns while its core keeps serving, so no process
@@ -1239,16 +1271,27 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 	if err := resolveSubscriptionCarrier(&opts); err != nil {
 		return clientState{}, err
 	}
-	configYAML, err := renderClientConfig(opts, ce, run)
+	// A TUN session is adopted in two steps, and this is the first: the probe
+	// renderer drops the TUN inbound, so it starts a mixed port ONLY. A
+	// candidate that fails the checks below leaves the LAN untouched - no
+	// device, no route, no DNS edit. Before 2026-11-18 the TUN came up with
+	// the core itself, so every failing attempt (and -hold makes the retries
+	// continuous) put the whole house behind a tunnel that was still being
+	// tested, with no way back short of killing the process.
+	probeOpts := opts
+	if opts.tunMode {
+		probeOpts.tunMode = false
+	}
+	configYAML, err := renderClientConfig(probeOpts, ce, run)
 	if err != nil {
 		return clientState{}, err
 	}
 	c, err := core.New(core.Config{
 		BinaryPath: bin,
 		WorkDir:    cDir,
-		MixedPort:  opts.mixedPort,
-		APIPort:    opts.apiPort,
-		TUN:        opts.tunMode,
+		MixedPort:  probeOpts.mixedPort,
+		APIPort:    probeOpts.apiPort,
+		TUN:        probeOpts.tunMode,
 		// A coreLog is attached only by the GUI (its log panel tee): that is
 		// exactly the session type whose core must die with the client. The
 		// CLI connect returns and leaves the core serving on purpose.
@@ -1323,7 +1366,7 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 	// (HTTPS, DNS via the hostname, optional IPv6, exit IP) prove it. The
 	// system proxy is still untouched here — a failed candidate leaves no
 	// host mutation to undo.
-	probe, perr := verifyTunnel(ctx, opts, func(msg string) { stageMsg(fmt.Sprintf("[%s] %s", label, msg)) })
+	probe, perr := verifyTunnel(ctx, probeOpts, func(msg string) { stageMsg(fmt.Sprintf("[%s] %s", label, msg)) })
 	if perr != nil {
 		_ = c.Stop()
 		return clientState{}, fmt.Errorf("数据面验证失败: %w", perr)
@@ -1346,6 +1389,19 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 				return clientState{}, &slowRelayError{bps: bps}
 			}
 			stageMsg(fmt.Sprintf("[%s] 出口偏慢（低于 %d KB/s），但已无更快的候选，保留当前连接", label, openvpnMinBps/1024))
+		}
+	}
+
+	// The exit carries real traffic; only now is adopting the LAN defensible.
+	// The probe instance ran without the TUN inbound, so stopping it puts the
+	// LAN back exactly where it was. The second instance takes the ports over
+	// with the TUN inbound and owns the adoption from here on.
+	if opts.tunMode {
+		stageMsg(fmt.Sprintf("[%s] 出口已验证，切换到 TUN 接管整屋流量…", label))
+		_ = c.Stop()
+		c, err = adoptTun(ctx, opts, ce, run, bin, cDir, label)
+		if err != nil {
+			return clientState{}, err
 		}
 	}
 
@@ -1491,6 +1547,144 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 		}
 	}
 	return state, nil
+}
+
+// adoptTun starts the TUN session proper, once the probe instance has proved
+// the exit carries traffic.
+//
+// The probe ran with tunMode=false, so stopping it restores the LAN exactly.
+// Everything here is a local operation (device creation, route insertion)
+// except the final round-trip, which is why the window in which the house
+// depends on a brand-new core is seconds long instead of the whole candidate
+// loop. The LAN is NOT touched if this returns an error.
+func adoptTun(ctx context.Context, opts options, ce cachedEndpoint, run protoRun, bin, cDir, label string) (*core.Core, error) {
+	cfg, err := renderClientConfig(opts, ce, run)
+	if err != nil {
+		return nil, err
+	}
+	c, err := core.New(core.Config{
+		BinaryPath:      bin,
+		WorkDir:         cDir,
+		MixedPort:       opts.mixedPort,
+		APIPort:         opts.apiPort,
+		TUN:             true,
+		TieCoreToClient: opts.coreLog != nil,
+		LogWriter:       opts.coreLog,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := c.WriteConfig(cfg); err != nil {
+		return nil, err
+	}
+	stageMsg(fmt.Sprintf("[%s] 启动 TUN 会话…", label))
+	if err := c.Start(); err != nil {
+		return nil, err
+	}
+	wctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if err := c.WaitReady(wctx); err != nil {
+		_ = c.Stop()
+		var crash *core.CrashError
+		if errors.As(err, &crash) {
+			stageMsg(fmt.Sprintf("[%s] %s", label, crash.Hint()))
+		}
+		return nil, err
+	}
+	// The controller answering says nothing about the device: auto-route runs
+	// after it, and the LAN is not actually adopted until the interface
+	// exists. Reporting "connected" on a device that never appeared is exactly
+	// the shape of the 2026-11-18 outage.
+	if !waitTunDevice(ctx, 10*time.Second) {
+		_ = c.Stop()
+		teardownTunDevice()
+		return nil, fmt.Errorf("TUN 接管超时：%s 未出现", tunDeviceName())
+	}
+	// An OpenVPN exit handshakes lazily on its first dial, and the restart
+	// above threw away the handshake the probe already paid for. Warm it up
+	// again before judging the adoption, otherwise a healthy relay reads as
+	// dead and the loop rotates away from a good node.
+	if opts.openvpnMode {
+		stageMsg(fmt.Sprintf("[%s] 重新预热 OpenVPN 中继…", label))
+		if werr := warmupOpenVPN(ctx, opts.mixedPort, label); werr != nil {
+			_ = c.Stop()
+			teardownTunDevice()
+			return nil, werr
+		}
+	}
+	// One more round-trip through the mixed port. The exit just passed a full
+	// verification, so a failure here means the restart broke something - the
+	// caller retries this same endpoint rather than declaring it bad.
+	if _, perr := fetchExitProbe(ctx, opts.mixedPort); perr != nil {
+		if !sleepCtx(ctx, verifyRetryDelay) {
+			_ = c.Stop()
+			teardownTunDevice()
+			return nil, ctx.Err()
+		}
+		if _, perr = fetchExitProbe(ctx, opts.mixedPort); perr != nil {
+			_ = c.Stop()
+			teardownTunDevice()
+			return nil, fmt.Errorf("接管后数据面不通: %w", perr)
+		}
+	}
+	return c, nil
+}
+
+// teardownTunDevice removes the pinned tunnel interface and the policy rules
+// that mihomo's auto-route installed for it.
+//
+// mihomo is supposed to undo both on exit, and on ImmortalWrt 24.10 it does
+// not: a graceful disconnect logs `disconnected`, the core vanishes, and ace0
+// is still UP with its ip rules intact (measured on hardware 2026-11-18). With
+// table 2022 empty the leftover rules are inert, which is worse than broken -
+// nothing looks wrong until something refills that table, and then every
+// matching packet disappears without a trace. The init script sweeps them too;
+// this is the layer that also covers a CLI disconnect nobody wraps in stop.
+func teardownTunDevice() {
+	dev := tunDeviceName()
+	if dev == "" {
+		return
+	}
+	// Rules first: deleting the link drops the routes it owned, but never the
+	// rules that point at the table those routes lived in.
+	if out, err := exec.Command("ip", "rule", "show").Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.Contains(line, "lookup 2022") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			pref := strings.TrimSuffix(fields[0], ":")
+			_ = exec.Command("ip", "rule", "del", "pref", pref, "lookup", "2022").Run()
+		}
+	}
+	if exec.Command("ip", "link", "show", dev).Run() == nil {
+		_ = exec.Command("ip", "link", "del", dev).Run()
+	}
+}
+
+// waitTunDevice waits for the pinned tunnel interface to appear. On macOS the
+// name is kernel-assigned (empty here), and the core's own readiness is the
+// only available signal.
+func waitTunDevice(ctx context.Context, timeout time.Duration) bool {
+	dev := tunDeviceName()
+	if dev == "" {
+		return true
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat("/sys/class/net/" + dev); err == nil {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		if !sleepCtx(ctx, 200*time.Millisecond) {
+			return false
+		}
+	}
 }
 
 // markEndpointDead persists a tunnel-verification failure in the scan cache so
@@ -1661,6 +1855,15 @@ func runDisconnectCmd(ctx context.Context, opts options) error {
 		}
 	} else if err := c.Stop(); err != nil {
 		fmt.Fprintln(os.Stderr, errPal.warn("stop core: "+err.Error()))
+	}
+	// The core is gone; sweep what it owned. Scoped by state.TUN on purpose:
+	// ace0 is a fixed name, so an unconditional sweep here would let a
+	// proxy-only session (a debug connect on another port, an OpenVPN test run)
+	// delete the device belonging to the live service. That is not theoretical
+	// - it happened on 2026-11-19 and left the LAN on the direct path while the
+	// plugin still reported "connected".
+	if state.TUN {
+		teardownTunDevice()
 	}
 	// A cancelled connect starts a core and only writes it to state when the
 	// session succeeds, so clicking 断开 mid-connect finds CorePID == 0 and the

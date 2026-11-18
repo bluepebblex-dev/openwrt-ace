@@ -1302,10 +1302,21 @@ func verifyTunnel(ctx context.Context, opts options, logf func(string)) (clientS
 	logf("数据面验证：吞吐（下载载荷）…")
 	bps, terr := probeThroughput(ctx, opts.mixedPort, payloadBytes, payloadTimeout)
 	if terr != nil {
-		return probe, fmt.Errorf("隧道能握手但无法传输数据: %w", terr)
+		// A timed-out transfer on an OpenVPN exit is usually a slow relay, not
+		// a dead one: VPN Gate throttles, and the payload is 512 KiB. As long
+		// as bytes did move above the stall floor, keep the measurement and
+		// let the speed gate below decide - it knows about openvpnAcceptSlow
+		// ("no faster candidate left, keep this one"), which a hard failure
+		// here bypassed entirely. Before this, every candidate on a router was
+		// rejected as "cannot carry data" while HTTPS through it worked fine.
+		if !opts.openvpnMode || bps < openvpnSlowFloor {
+			return probe, fmt.Errorf("隧道能握手但无法传输数据: %w", terr)
+		}
+		logf(fmt.Sprintf("吞吐偏慢（≈%d KB/s，载荷未跑满），交由速度判定", bps/1024))
+	} else {
+		logf("吞吐验证成功")
 	}
 	probe.MeasuredBps = bps
-	logf("吞吐验证成功")
 
 	// DNS, as its own line: the round-trip above proves it implicitly (every
 	// source is a hostname resolved inside the tunnel), so this is a report,

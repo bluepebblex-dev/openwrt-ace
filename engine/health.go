@@ -1070,6 +1070,10 @@ func spawnHealthGuard(st clientState) {
 		fmt.Fprintln(os.Stderr, errPal.warn("health guard not started: "+err.Error()))
 		return
 	}
+	// Read the pid before Release: releasing the handle zeroes it out, and the
+	// log line then claims "pid -1", which reads like the guard failed to start
+	// on a session that is actually being watched.
+	pid := cmd.Process.Pid
 	_ = cmd.Process.Release()
-	fmt.Fprintln(os.Stderr, errPal.dim(fmt.Sprintf("health guard: pid %d watches the data plane on port %d", cmd.Process.Pid, port)))
+	fmt.Fprintln(os.Stderr, errPal.dim(fmt.Sprintf("health guard: pid %d watches the data plane on port %d", pid, port)))
 }

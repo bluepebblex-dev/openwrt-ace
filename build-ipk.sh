@@ -18,7 +18,7 @@ GO=${GO:-$(command -v go 2>/dev/null || echo go)}
 echo "==> 编译引擎 (linux/arm64)"
 mkdir -p "$STAGE/bin"
 (cd "$SRC" && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 "$GO" build \
-	-ldflags "-s -w" -o "$STAGE/bin/ace-engine" .)
+	-ldflags "-s -w -X main.version=$VER" -o "$STAGE/bin/ace-engine" .)
 
 echo "==> 打包"
 rm -rf "$DIST" "$STAGE/ace" "$STAGE/luci"

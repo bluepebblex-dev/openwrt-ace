@@ -134,9 +134,14 @@ func TestOpenVPNMTUNestedCap(t *testing.T) {
 // TestVPNGateSpeedRanking pins the speed memory's order: measured-fast first,
 // untested next, measured-slow last — so a relay that once carried traffic but
 // now crawls cannot stay in front of candidates nobody has measured.
+//
+// "Slow" is relative to openvpnMinBps, so the slow fixture sits well under the
+// floor (10 KB/s vs 32 KB/s): a value that was slow under the old 150 KB/s gate
+// reads as acceptable now, which is the point of the lower floor on router
+// hardware.
 func TestVPNGateSpeedRanking(t *testing.T) {
 	nodes := []vpnGateNode{
-		{CountryShort: "JP", IP: "198.51.100.1", Port: 443, Proto: "tcp", Class: "residential", MeasuredBps: 50 * 1024},
+		{CountryShort: "JP", IP: "198.51.100.1", Port: 443, Proto: "tcp", Class: "residential", MeasuredBps: 10 * 1024},
 		{CountryShort: "JP", IP: "198.51.100.2", Port: 443, Proto: "tcp", Class: "residential"},
 		{CountryShort: "JP", IP: "198.51.100.3", Port: 443, Proto: "tcp", Class: "residential", MeasuredBps: 1024 * 1024},
 	}

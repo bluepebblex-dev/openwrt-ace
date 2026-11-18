@@ -60,7 +60,12 @@ const (
 	vpnGateConnectNodes = 24
 	// vpnGateFetchTimeout bounds the direct fetch; the WARP fallback has its
 	// own, longer budget because a handshake and a TLS round-trip ride on it.
-	vpnGateFetchTimeout = 12 * time.Second
+	//
+	// 30s, not 12s: the payload is ~1.3 MB. On a router CPU behind a WARP
+	// tunnel the same fetch measures ~7s with wget, and Go's TLS client costs
+	// more on top - 12s sat right on the edge and lost the whole node list on
+	// a slow round, which then fell through to a WARP fetch that failed too.
+	vpnGateFetchTimeout = 30 * time.Second
 	// vpnGateProbeJobs / vpnGateProbeTimeout match the Android client: eight
 	// concurrent TCP probes, three seconds each. Only TCP profiles are probed;
 	// a UDP node keeps the API's self-reported ping.
@@ -781,6 +786,12 @@ func vpnGateNodesFor(ctx context.Context, results []cachedEndpoint, run protoRun
 	}
 	if len(fresh) == 0 {
 		err = derr
+		// Name the real reason: on a router the direct fetch fails for host
+		// reasons (CA store, resolver, MTU) that the fallback's error would
+		// otherwise bury.
+		if derr != nil {
+			stageMsg(fmt.Sprintf("VPN Gate 直连失败：%v", derr))
+		}
 		if len(results) > 0 {
 			stageMsg("VPN Gate 直连不可用，经 WARP 底座获取节点列表…")
 			var wn []vpnGateNode
@@ -789,6 +800,7 @@ func vpnGateNodesFor(ctx context.Context, results []cachedEndpoint, run protoRun
 				fresh = wn
 			} else if werr != nil {
 				err = werr
+				stageMsg(fmt.Sprintf("经 WARP 获取节点失败：%v", werr))
 			}
 		}
 	}
@@ -883,12 +895,17 @@ func fetchVPNGateNodesViaWARP(ctx context.Context, results []cachedEndpoint, run
 		if !ce.Working || ce.Endpoint == "" {
 			continue
 		}
-		if tried >= 3 {
+		// 6, not 3: the cached working set on a router is hours old and DPI
+		// tears endpoints down between scans, so three handshake slots can all
+		// land on dead ones and lose the node list for the whole connect.
+		if tried >= 6 {
 			break
 		}
 		tried++
-		hctx, cancel := context.WithTimeout(ctx, 6*time.Second)
-		ok := t.handshake(hctx, ce.Endpoint, 6*time.Second)
+		// 8s, not 6s: an AmneziaWG handshake on router hardware behind a
+		// lossy uplink routinely needs longer than a desktop does.
+		hctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		ok := t.handshake(hctx, ce.Endpoint, 8*time.Second)
 		cancel()
 		if !ok {
 			lastErr = fmt.Errorf("endpoint %s handshake failed", ce.Endpoint)

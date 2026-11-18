@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math"
@@ -118,6 +119,23 @@ var commands = []command{
 		intro: []string{"Prints the version alone, so a script can compare it as is."},
 		setup: func(*flag.FlagSet, *options) {},
 		run:   runVersionCmd,
+	},
+	{
+		name:  "probe",
+		brief: "report which protocol configs a core binary can run",
+		intro: []string{
+			"Runs the core's own config test against a throwaway config per protocol",
+			"and prints the verdict as JSON.",
+			"",
+			"\"mihomo is installed\" and \"mihomo can run the OpenVPN outbound\" are two",
+			"different questions. An older core (v1.19.12 ships with ImmortalWrt 24.10)",
+			"accepts every WARP protocol but rejects type: openvpn, and the connect then",
+			"fails with what looks like a node problem. LuCI asks this first.",
+		},
+		setup: func(fs *flag.FlagSet, o *options) {
+			fs.StringVar(&o.corePath, "core", "", "")
+		},
+		run: runProbeCmd,
 	},
 	{
 		name:  "connect",
@@ -269,7 +287,9 @@ func main() {
 	defer cancel()
 
 	// "version" must stay a bare string: install.sh compares its whole output.
-	if cmd.name != "version" {
+	// "probe" is called from LuCI's status poll and must not pay for an update
+	// check on top of its own core runs.
+	if cmd.name != "version" && cmd.name != "probe" {
 		noticeUpdate(ctx)
 	}
 
@@ -321,4 +341,38 @@ func runCoreInstall(args []string) int {
 	}
 	fmt.Println(bin)
 	return 0
+}
+
+// runProbeCmd answers one question for LuCI: which protocol configs does this
+// core binary accept? It prints a single JSON line so the caller never has to
+// scrape prose, and it deliberately exits 0 even when a protocol is rejected —
+// "the core is too old" is an answer, not an error.
+func runProbeCmd(_ context.Context, opts options) error {
+	bin := opts.corePath
+	if bin == "" {
+		dir, err := coreDir()
+		if err != nil {
+			return err
+		}
+		bin = core.CoreInDir(dir)
+	}
+	fi, err := os.Stat(bin)
+	if err != nil || fi.IsDir() || fi.Size() == 0 {
+		return fmt.Errorf("core: %s 不存在或不是可执行文件", bin)
+	}
+	// A temp work dir: the caller's path is usually /usr/bin, and the config
+	// test writes its probe config next to the core.
+	ver, supported, _ := probeCoreCapabilities(bin, os.TempDir())
+	out := map[string]any{
+		"path":    bin,
+		"version": ver,
+		"openvpn": supported[probeOpenVPNProto],
+		"proto":   supported,
+	}
+	b, merr := json.Marshal(out)
+	if merr != nil {
+		return merr
+	}
+	fmt.Println(string(b))
+	return nil
 }
