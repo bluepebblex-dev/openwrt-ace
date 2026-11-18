@@ -133,15 +133,18 @@ func isExecutable(p string) bool {
 // no mirrors) since we have no embedded digest for it.
 func downloadRelease(workDir string) error {
 	client := httpClient(30 * time.Second)
-	assetName := "mihomo-" + osPartArch() + "-" + defaultVersion + gzExt()
-	expect, isPinned := pinnedCoreSHA256[assetName]
+
+	// 选中的版本（带 v 前缀，如 v1.19.34）。assetName 和直链都必须用它，
+	// 不能写死 defaultVersion——否则选中最新版却去下旧版文件名。
+	version := defaultVersion
 	var urls []string
-	apiVersion := ""
 	if v, assetURL, err := pickAsset(client); err == nil && assetURL != "" {
-		apiVersion = v
+		version = v
 		urls = append(urls, assetURL)
 	}
-	direct := "https://github.com/MetaCubeX/mihomo/releases/download/" + defaultVersion + "/" + assetName
+	assetName := "mihomo-" + osPartArch() + "-" + version + gzExt()
+	expect, isPinned := pinnedCoreSHA256[assetName]
+	direct := "https://github.com/MetaCubeX/mihomo/releases/download/" + version + "/" + assetName
 	if isPinned {
 		// Mirrors are only candidates for the pinned version: that is the one
 		// whose bytes we can actually verify.
@@ -151,16 +154,12 @@ func downloadRelease(workDir string) error {
 			"https://ghproxy.net/"+direct,
 		)
 	} else {
+		// 新版本没有内嵌摘要，只走官方直链，不碰镜像（无校验的镜像不可信）。
 		urls = append(urls, direct)
 	}
-	if apiVersion != "" && apiVersion != defaultVersion {
-		// The API handed us a newer tag than the pinned default; we have no
-		// embedded digest for it, so there is nothing to verify mirrors against.
-		expect = ""
-	}
 
-	fmt.Fprintf(os.Stderr, "core: mihomo %s not found in %s, downloading %s (%d source(s))\n",
-		defaultVersion, workDir, assetName, len(urls))
+	fmt.Fprintf(os.Stderr, "core: downloading %s into %s (%d source(s))\n",
+		version, workDir, len(urls))
 
 	var lastErr error
 	for _, u := range urls {
@@ -229,10 +228,9 @@ func osPartArch() string {
 }
 
 func pickAsset(client *http.Client) (version, url string, err error) {
-	if v, u, ok := releaseFor(client, defaultVersion); ok {
-		return v, u, nil
-	}
-	// Fall back to listing latest when the pinned one 404s (e.g. removed).
+	// "下载并更新"承诺装最新版，所以先问 /latest。之前这里反过来——先找
+	// pinned 的 defaultVersion，只有它 404 才查 latest——而 pinned tag 一直
+	// 在，结果永远只装 1.19.32，界面却提示有 1.19.34，自相矛盾。
 	req, _ := http.NewRequest(http.MethodGet, releasesAPI+"/latest", nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := client.Do(req)
@@ -240,11 +238,21 @@ func pickAsset(client *http.Client) (version, url string, err error) {
 		return "", "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("latest release: HTTP %d", resp.StatusCode)
+	}
 	var r release
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
 		return "", "", err
 	}
-	return matchingAsset(r)
+	if v, u, merr := matchingAsset(r); merr == nil {
+		return v, u, nil
+	}
+	// latest 没有本架构资产：退回 pinned tag（它一定有）。
+	if v, u, ok := releaseFor(client, defaultVersion); ok {
+		return v, u, nil
+	}
+	return "", "", fmt.Errorf("no installable asset for %s", osPartArch())
 }
 
 func releaseFor(client *http.Client, tag string) (string, string, bool) {
@@ -264,6 +272,46 @@ func releaseFor(client *http.Client, tag string) (string, string, bool) {
 	}
 	v, u, err := matchingAsset(r)
 	return v, u, err == nil
+}
+
+// LatestVersion reports the newest mihomo tag GitHub publishes, stripped of the
+// leading "v" so it compares directly with what the core prints for -v.
+//
+// Best effort by design: every failure path falls back to the pinned default
+// instead of returning an error, because this only decorates a settings page.
+// A "new version available" hint that breaks the page when GitHub is slow or
+// blocked is worse than no hint at all. Callers pass a short timeout for the
+// same reason - the probe it rides on runs while the user waits.
+func LatestVersion(timeout time.Duration) string {
+	fallback := strings.TrimPrefix(defaultVersion, "v")
+	client := httpClient(timeout)
+	req, err := http.NewRequest(http.MethodGet, releasesAPI+"/latest", nil)
+	if err != nil {
+		return fallback
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fallback
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fallback
+	}
+	var r release
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return fallback
+	}
+	// Only report a tag we could actually install on this host; a release with
+	// no asset for this arch is not an update the button could deliver.
+	if _, _, err := matchingAsset(r); err != nil {
+		return fallback
+	}
+	v := strings.TrimPrefix(strings.TrimSpace(r.TagName), "v")
+	if v == "" {
+		return fallback
+	}
+	return v
 }
 
 // matchingAsset finds the asset for <os>-<arch>. mihomo names assets like

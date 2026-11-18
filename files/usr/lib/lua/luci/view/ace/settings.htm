@@ -14,6 +14,8 @@
 	}
 	.ace-row:first-of-type { border-top: 0; }
 	.ace-row .lbl { flex: 0 0 190px; font-size: 12.5px; }
+	/* 内核行的绿框要紧跟标签，标签宽度按内容伸缩，避免长版本号挤到输入框上 */
+	#coreRow .lbl { flex: 0 0 auto; min-width: 190px; display: flex; align-items: center; gap: 8px; }
 	.ace-row .ctl { flex: 1 1 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 	.ace-row .sub { flex: 1 1 100%; font-size: 11.5px; opacity: .6; margin: 4px 0 0; line-height: 1.55; }
 	.ace-row input[type=text], .ace-row select { min-width: 220px; }
@@ -24,6 +26,15 @@
 	.ace-core-stat.ok { border-color: #2ea043; color: #2ea043; opacity: 1; }
 	.ace-core-stat.bad { border-color: #d29922; color: #d29922; opacity: 1; }
 	.ace-core-stat.busy { border-color: #58a6ff; color: #58a6ff; opacity: 1; }
+	/* 有新内核时按钮右上角一枚小点：不占位、不改文案，扫一眼就知道该点它 */
+	#coreBtn { position: relative; }
+	#coreBtn.has-upd::after {
+		content: ''; position: absolute; top: -3px; right: -3px;
+		width: 7px; height: 7px; border-radius: 50%;
+		background: #d29922; box-shadow: 0 0 0 2px rgba(0, 0, 0, .25);
+	}
+	.ace-core-latest { font-size: 11.5px; color: #d29922; white-space: nowrap; }
+	.ace-core-latest span { opacity: .75; }
 	.ace-toggle { width: 18px; height: 18px; accent-color: #2f7d4f; }
 	.ace-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 	.ace-msg { font-size: 12.5px; }
@@ -140,17 +151,17 @@
 			<div class="lbl">控制接口端口</div>
 			<div class="ctl"><input type="number" class="cbi-input-text" id="f-api_port" min="1" max="65535" style="width:110px;min-width:110px"></div>
 		</div>
-		<div class="ace-row">
-			<div class="lbl">内核</div>
+		<div class="ace-row" id="coreRow">
+			<div class="lbl">内核 <span class="ace-core-stat" id="coreStat">检测中…</span></div>
 			<div class="ctl">
 				<input type="text" class="cbi-input-text" id="f-core" placeholder="/usr/bin/mihomo">
-				<span class="ace-core-stat" id="coreStat">检测中…</span>
-				<button class="btn cbi-button" id="coreBtn" onclick="aceInstallCore()">下载内核</button>
+				<button class="btn cbi-button" id="coreBtn" onclick="aceInstallCore()">下载并更新</button>
+				<span class="ace-core-latest" id="coreLatest" style="display:none"></span>
 			</div>
 			<p class="sub">
 				实际使用顺序是 <code>/etc/ace/core/mihomo</code>（下载版）优先，没有才用这里填的路径（留空即 <code>/usr/bin/mihomo</code>）。<br>
 				系统自带的 mihomo 往往偏旧——ImmortalWrt 24.10 是 v1.19.12，<b>不支持 OpenVPN 出站，也不支持 MASQUE</b>。
-				点「下载内核」取官方 v1.19.32（源不通时自动换镜像），校验 SHA256 后装到
+				点「下载并更新」取官方最新版（源不通时自动换镜像），校验 SHA256 后装到
 				<code>/etc/ace/core/mihomo</code>，约 20 MB；下载版一旦存在就自动优先生效，不必改上面的路径。
 			</p>
 		</div>
@@ -176,6 +187,7 @@ var ACE_STATUS = '<%=url("admin/services/ace/api/status")%>';
 var ACE_CORE = '<%=url("admin/services/ace/api/core")%>';
 var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var ACE_FLAGS = ['tun', 'openvpn', 'ipv6', 'dns_takeover', 'dns_leak', 'lan_watchdog', 'enabled'];
+var ACE_SAW_INSTALL = false; /* 本次页面里见过下载标记，用于结束时提示「已更新」 */
 
 /* VPN Gate 有节点的国家。顺序按国内常用程度排，空值=自动。
    列表不求全：下拉里没有的地区仍可通过「自动」或后端手工填 uci 使用。 */
@@ -331,8 +343,11 @@ function aceSize(b) {
 function aceCoreRender(d) {
 	var stat = document.getElementById('coreStat');
 	var btn = document.getElementById('coreBtn');
+	var latest = document.getElementById('coreLatest');
 	ACE_CORE_INFO = d.core || {};
 	aceOvpnHint();
+	latest.style.display = 'none';
+	btn.classList.remove('has-upd');
 	if (d.core_installing) {
 		stat.className = 'ace-core-stat busy';
 		stat.textContent = '正在下载内核…';
@@ -342,18 +357,29 @@ function aceCoreRender(d) {
 		return true;
 	}
 	btn.disabled = false;
+	btn.textContent = '下载并更新';
 	var c = d.core || {};
 	if (c.ok) {
 		var ver = c.version ? ' v' + c.version : '';
 		stat.className = 'ace-core-stat ' + (c.openvpn === false ? 'bad' : 'ok');
 		stat.textContent = '已就绪' + ver + (c.src === 'downloaded' ? '（下载版）' : '');
 		stat.title = (c.path || '') + (c.openvpn === false ? '\n该内核不支持 OpenVPN 出站 / MASQUE' : '');
-		btn.textContent = c.openvpn === false ? '下载新版内核' : '重新下载';
+		// 有更新：按钮打点 + 按钮后直接写「最新 vX」，省得点下去才知道会装什么。
+		// c.update 由后端按官方最新版比较得出；取不到最新版时为 false，宁可不提示。
+		if (c.update && c.latest) {
+			btn.classList.add('has-upd');
+			latest.style.display = '';
+			latest.innerHTML = '<span>最新</span> v' + c.latest;
+			latest.title = '点「下载并更新」安装 v' + c.latest;
+		}
 	} else {
 		stat.className = 'ace-core-stat bad';
 		stat.textContent = '未找到';
 		stat.title = d.core_log || '';
-		btn.textContent = '下载内核';
+		if (c.latest) {
+			latest.style.display = '';
+			latest.innerHTML = '<span>将安装</span> v' + c.latest;
+		}
 	}
 	return false;
 }
@@ -364,8 +390,16 @@ function aceCorePoll(times) {
 	x.onload = function () {
 		var d = null;
 		try { d = JSON.parse(x.responseText); } catch (e) { return; }
+		var busy = aceCoreRender(d);
+		if (busy) {
+			ACE_SAW_INSTALL = true;
+		} else if (ACE_SAW_INSTALL) {
+			ACE_SAW_INSTALL = false;
+			/* 下载标记消失＝内核已落盘且服务已重启完，给个明确回执 */
+			aceMsg('内核已更新，服务正在重连（OpenVPN 出口约需 1–3 分钟）', 'ok');
+		}
 		/* 下载中每 2.5 秒看一次，最多盯 5 分钟 */
-		if (aceCoreRender(d) && (times || 0) < 120) {
+		if (busy && (times || 0) < 120) {
 			setTimeout(function () { aceCorePoll((times || 0) + 1); }, 2500);
 		}
 	};
@@ -373,7 +407,7 @@ function aceCorePoll(times) {
 }
 
 function aceInstallCore() {
-	if (!confirm('从 GitHub 下载 mihomo 内核（约 15 MB），下载后校验 SHA256，继续？')) return;
+	if (!confirm('从 GitHub 下载 mihomo 内核（约 15 MB），校验 SHA256 后自动重启服务使新内核生效。服务在运行时会短暂断网重连（OpenVPN 出口约需 1–3 分钟）。继续？')) return;
 	var stat = document.getElementById('coreStat');
 	document.getElementById('coreBtn').disabled = true;
 	stat.className = 'ace-core-stat busy';

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"time"
 
 	"github.com/bluepebblex-dev/openwrt-ace/engine/internal/core"
 )
@@ -368,6 +369,10 @@ func runProbeCmd(_ context.Context, opts options) error {
 		"version": ver,
 		"openvpn": supported[probeOpenVPNProto],
 		"proto":   supported,
+		// latest drives the "a newer core exists" hint in settings. 3s: the
+		// probe runs while the page loads, and GitHub is not always reachable
+		// from a router that has not connected yet.
+		"latest": core.LatestVersion(3 * time.Second),
 	}
 	b, merr := json.Marshal(out)
 	if merr != nil {

@@ -143,6 +143,9 @@ local CORE_LOG = "/var/log/ace-core.log"
 -- probe 结果按 (path, size, mtime) 缓存：一次 probe 要跑八次 mihomo -t（约 3 秒），
 -- 而 api_status 每 2.5 秒被轮询一次，不缓存等于把 CPU 钉在配置解析上。
 local PROBE_CACHE = "/var/run/ace-probe.json"
+-- 缓存有效期。内核能力本身不会变，但 probe 顺带查的「官方最新版」会变，
+-- 6 小时重探一次足够，也不会让设置页每分钟跑一遍配置测试。
+local PROBE_TTL = 6 * 3600
 
 -- 是否是一个可执行文件：返回字节数，不是就返回 nil。
 -- 不能用 st.mode 判断——这台 ImmortalWrt 的 nixio 精简编译里 stat().mode 是 nil
@@ -172,7 +175,11 @@ local function core_probe(path, size)
 	local raw = fs.readfile(PROBE_CACHE)
 	if raw and raw ~= "" then
 		local ok, t = pcall(function() return require("luci.jsonc").parse(raw) end)
-		if ok and type(t) == "table" and t.path == path and t.size == size and t.mtime == mtime then
+		-- TTL 只用来让 latest 跟上新发布：命中条件里除了内核文件指纹，还要
+		-- 看这份缓存有多旧。没有 TTL 的话，第一次探测把 latest 定死，
+		-- 上游发了新版本界面也永远说「已是最新」。
+		if ok and type(t) == "table" and t.path == path and t.size == size
+			and t.mtime == mtime and (os.time() - (t.at or 0)) < PROBE_TTL then
 			cached = t
 		end
 	end
@@ -181,17 +188,36 @@ local function core_probe(path, size)
 	end
 
 	local out = sys.exec("/usr/bin/ace-engine probe -core " .. shq(path) .. " 2>/dev/null")
-	local res = { path = path, size = size, mtime = mtime, openvpn = false, version = "" }
+	local res = { path = path, size = size, mtime = mtime, at = os.time(),
+		openvpn = false, version = "", latest = "" }
 	if out and out ~= "" then
 		local ok, t = pcall(function() return require("luci.jsonc").parse(out) end)
 		if ok and type(t) == "table" then
 			res.openvpn = t.openvpn == true
 			res.version = t.version or ""
 			res.proto = t.proto
+			res.latest = t.latest or ""
 		end
 	end
 	fs.writefile(PROBE_CACHE, require("luci.jsonc").stringify(res) .. "\n")
 	return res
+end
+
+-- "1.19.9" < "1.19.32"：按段比数字，不能按字符串比（否则 9 > 32）。
+local function ver_lt(a, b)
+	local function parts(v)
+		local t = {}
+		for n in tostring(v):gmatch("%d+") do t[#t + 1] = tonumber(n) end
+		return t
+	end
+	local x, y = parts(a), parts(b)
+	for i = 1, math.max(#x, #y) do
+		local l, r = x[i] or 0, y[i] or 0
+		if l ~= r then
+			return l < r
+		end
+	end
+	return false
 end
 
 local function core_state()
@@ -220,6 +246,11 @@ local function core_state()
 	local p = core_probe(st.path, st.size)
 	st.version = p.version
 	st.openvpn = p.openvpn
+	st.latest = p.latest or ""
+	-- 「有更新」只按引擎查到的官方最新版判断：装上的是系统版 1.19.12 就是有，
+	-- 已经是 1.19.32 就没有。两个都空（网络不通、API 取不到）时不提示，
+	-- 绝不因为查不到就说「有新版本」。
+	st.update = (st.version ~= "" and st.latest ~= "" and ver_lt(st.version, st.latest)) and true or false
 	-- 旧内核缺的不止 OpenVPN：MASQUE 出站也是 v1.19.2x 之后才有。界面据此
 	-- 提前说清「这个协议在现内核上跑不起来」，而不是让人对着握手失败猜。
 	st.proto = p.proto
@@ -515,11 +546,22 @@ function api_core()
 		return
 	end
 
+	-- 下载成功后让新内核真正生效：Linux 下替换正在执行的二进制，旧进程仍
+	-- 持有旧 inode。只换文件不重启的话，界面读磁盘显示新版本，流量却还走旧内核，
+	-- 看起来就是「下载了没更新」。所以下载命令返回 0 时接着重启服务（同一条
+	-- 链路：stop 幂等清理 → 两阶段接管重建隧道）。
+	-- 只在服务本就在跑时重启：用户故意停着服务时下载内核，不该把服务拉起来。
+	local st = read_state() or {}
+	local was_running = st.connected and pid_alive(st.core_pid)
+	local restart = was_running
+		and (" && /etc/init.d/ace restart >>" .. CORE_LOG .. " 2>&1")
+		or ""
+
 	-- 标记先落盘再起进程，否则界面第一次轮询会看不到进度
 	fs.writefile(CORE_FLAG, "1\n")
 	sys.call(": > " .. CORE_LOG .. "; ( WARP_CLIENT_HOME=/etc/ace /usr/bin/ace-engine core -dir " ..
-		CORE_DIR .. " -force >>" .. CORE_LOG ..
-		" 2>&1; rm -f " .. CORE_FLAG .. " ) >/dev/null 2>&1 &")
+		CORE_DIR .. " -force >>" .. CORE_LOG .. " 2>&1" .. restart ..
+		"; rm -f " .. CORE_FLAG .. " ) >/dev/null 2>&1 &")
 
 	http.prepare_content("application/json")
 	http.write_json({ ok = true, installing = true })
