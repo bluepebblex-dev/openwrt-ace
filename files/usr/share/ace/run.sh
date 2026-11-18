@@ -14,6 +14,9 @@ core=$(uci -q get ace.main.core); core=${core:-/usr/bin/mihomo}
 ovpn=$(uci -q get ace.main.openvpn)
 region=$(uci -q get ace.main.openvpn_region)
 ipv6=$(uci -q get ace.main.ipv6)
+# 节点页「设为默认」写入的出口端点（ip:port）。非空时强制走它，否则引擎
+# 自动挑最优。校验在 LuCI 写入侧做过（只认扫描缓存里的端点）。
+pick=$(uci -q get ace.main.pick)
 # TUN 是显式开关：dns_takeover 只在 tun=1 时才有意义（没 TUN 就没有内核
 # 解析器可指），所以这里不反向推断，避免「打开 DNS 接管」顺手把 TUN 也带上。
 tun=$(uci -q get ace.main.tun)
@@ -39,6 +42,11 @@ set -- connect -hold -proto "$proto" -core "$core" \
 [ "$ovpn" = "1" ] && set -- "$@" -openvpn
 [ -n "$region" ] && [ "$ovpn" = "1" ] && set -- "$@" -openvpn-region "$region"
 [ "$ipv6" = "1" ] && set -- "$@" -6
+# pick 只认 ip:port 形态，防 uci 被手工改坏后把任意字符串喂给命令行
+case "$pick" in
+	""|*[!0-9a-zA-Z.:\[\]-]*) ;;
+	*) set -- "$@" -pick "$pick" ;;
+esac
 
 {
 	echo "=== $(date '+%F %T') ace $* ==="

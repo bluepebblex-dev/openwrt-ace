@@ -1,0 +1,292 @@
+<%+header%>
+<% local uci = require("luci.model.uci").cursor() %>
+<% local cur_proto = uci:get("ace", "main", "proto") or "awg" %>
+
+<style type="text/css">
+	.ace-wrap { max-width: 920px; margin: 0 auto; }
+	.ace-page-head { margin-top: 14px; }
+	.ace-page-head h2 { margin: 0; font-size: 22px; font-weight: 600; }
+	.ace-page-head .sub { font-size: 11px; opacity: .6; margin-top: 3px; }
+
+	.ace-toolbar { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+	.ace-search {
+		display: flex; align-items: center; gap: 8px; padding: 0 12px; height: 34px;
+		background: rgba(127,127,127,.10); border: 1px solid rgba(127,127,127,.18);
+		border-radius: 9px; width: 240px;
+	}
+	.ace-search input {
+		border: 0; background: transparent; color: inherit; outline: none;
+		font-size: 12px; width: 100%;
+	}
+	.ace-chip {
+		border: 0; cursor: pointer; padding: 0 12px; height: 30px; border-radius: 8px;
+		background: rgba(127,127,127,.10); color: inherit; font-size: 12px;
+	}
+	.ace-chip.on { background: rgba(46,125,82,.22); font-weight: 600; }
+	.ace-sep { width: 1px; height: 18px; background: rgba(127,127,127,.3); margin: 0 4px; }
+	.ace-scan {
+		border: 0; cursor: pointer; padding: 0 12px; height: 34px; border-radius: 9px;
+		background: rgba(127,127,127,.10); color: inherit; font-size: 12px; margin-left: auto;
+	}
+	.ace-scan[disabled] { opacity: .6; cursor: progress; }
+
+	.ace-list {
+		margin-top: 14px; background: rgba(127,127,127,.08);
+		border: 1px solid rgba(127,127,127,.16); border-radius: 13px; overflow: hidden;
+	}
+	.ace-count { padding: 10px 16px; font-size: 11px; opacity: .65; }
+	.ace-rows { max-height: 480px; overflow: auto; }
+	.ace-row {
+		display: flex; align-items: center; gap: 12px; padding: 9px 14px; cursor: pointer;
+		border-top: 1px solid rgba(127,127,127,.10);
+	}
+	.ace-row:hover { background: rgba(127,127,127,.10); }
+	.ace-row.active { background: rgba(46,125,82,.16); }
+	.ace-row .flag { font-size: 17px; width: 28px; text-align: center; flex: 0 0 auto; }
+	.ace-row .nm { flex: 1 1 auto; min-width: 0; }
+	.ace-row .nm .t { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.ace-row .nm .s { font-size: 11px; opacity: .6; margin-top: 1px; }
+	.ace-row .tag { font-size: 10px; color: #2e7d52; flex: 0 0 auto; }
+	.ace-row .star {
+		border: 0; background: transparent; cursor: pointer; font-size: 14px;
+		color: rgba(127,127,127,.5); padding: 2px 4px; flex: 0 0 auto;
+	}
+	.ace-row .star.on { color: #e8a33d; }
+	.ace-row .lat {
+		font-family: ui-monospace, Menlo, monospace; font-size: 12px; width: 62px;
+		text-align: right; flex: 0 0 auto;
+	}
+	.ace-row .bars { display: flex; align-items: flex-end; gap: 2px; width: 22px; height: 16px; flex: 0 0 auto; }
+	.ace-row .bars i { width: 4px; border-radius: 1.5px; background: rgba(127,127,127,.3); }
+	.ace-row .bars i.on { background: #2e7d52; }
+	.ace-empty { text-align: center; padding: 52px 0; font-size: 13px; opacity: .65; }
+	.ace-note { font-size: 12px; opacity: .68; margin-top: 12px; line-height: 1.7; }
+</style>
+
+<div class="ace-wrap">
+	<div class="ace-page-head">
+		<h2>节点 <a style="font-size:12px;opacity:.7" href="<%=url('admin/services/ace')%>">← 返回首页</a></h2>
+		<div class="sub">节点列表 · 收藏 · 设为默认。点击行 = 把该端点设为默认出口（pick），星标 = 收藏。</div>
+	</div>
+
+	<div class="ace-toolbar">
+		<div class="ace-search">🔎 <input type="text" id="q" placeholder="搜索节点、国家/地区"></div>
+		<button class="ace-chip on" id="cAll" onclick="aceFilter('all')">全部</button>
+		<button class="ace-chip" id="cWork" onclick="aceFilter('working')">可用</button>
+		<button class="ace-chip" id="cStar" onclick="aceFilter('starred')">收藏</button>
+		<span class="ace-sep"></span>
+		<button class="ace-chip on" id="sLat" onclick="aceSort('latency')">延迟排序</button>
+		<button class="ace-chip" id="sName" onclick="aceSort('name')">名称排序</button>
+		<button class="ace-scan" id="scanBtn" onclick="aceScan()">⟳ 刷新扫描</button>
+	</div>
+
+	<div class="ace-list">
+		<div class="ace-count" id="count">（加载中…）</div>
+		<div class="ace-rows" id="rows"></div>
+	</div>
+
+	<div class="ace-note">
+		列表来自最近一次端点扫描的缓存（6 小时有效）。「设为默认」在下次连接时生效；
+		已连接时点击会提示重建隧道。MASQUE 系协议没有可选端点，列表显示的是 wg/awg 的扫描结果。
+	</div>
+</div>
+
+<script type="text/javascript">
+var ACE_NODES = '<%=url("admin/services/ace/api/nodes")%>';
+var ACE_PICK = '<%=url("admin/services/ace/api/pick")%>';
+var ACE_SCAN = '<%=url("admin/services/ace/api/scan")%>';
+var ACE_STATUS = '<%=url("admin/services/ace/api/status")%>';
+var ACE_TOKEN = '<%=context.authtoken or ""%>';
+var CUR_PROTO = '<%=cur_proto%>';
+var aceData = null, aceFilterMode = 'all', aceSortMode = 'latency';
+var aceState = null;   /* 首页 status：用于标「使用中」 */
+
+var COUNTRY_NAMES = {
+	CN: '中国', HK: '中国香港', TW: '中国台湾', MO: '中国澳门', JP: '日本', KR: '韩国',
+	TH: '泰国', SG: '新加坡', US: '美国', DE: '德国', GB: '英国', FR: '法国',
+	NL: '荷兰', CA: '加拿大', AU: '澳大利亚', SE: '瑞典', FI: '芬兰', CH: '瑞士'
+};
+
+function aceFlag(iso) {
+	if (!iso || iso.length !== 2) return '🌐';
+	var a = iso.toUpperCase().charCodeAt(0), b = iso.toUpperCase().charCodeAt(1);
+	if (a < 65 || a > 90 || b < 65 || b > 90) return '🌐';
+	return String.fromCodePoint(127397 + a - 65, 127397 + b - 65);
+}
+
+function aceFilter(m) {
+	aceFilterMode = m;
+	['All', 'Work', 'Star'].forEach(function (s) {
+		document.getElementById('c' + s).className = 'ace-chip' + (m === s.toLowerCase() ? ' on' : '');
+	});
+	aceRenderList();
+}
+function aceSort(m) {
+	aceSortMode = m;
+	document.getElementById('sLat').className = 'ace-chip' + (m === 'latency' ? ' on' : '');
+	document.getElementById('sName').className = 'ace-chip' + (m === 'name' ? ' on' : '');
+	aceRenderList();
+}
+
+function aceRows() {
+	if (!aceData || !aceData.results) return [];
+	var star = aceData.starred || {}, needle = (document.getElementById('q').value || '').trim().toLowerCase();
+	var out = [];
+	for (var i = 0; i < aceData.results.length; i++) {
+		var ce = aceData.results[i];
+		if (aceFilterMode === 'working' && !ce.working) continue;
+		if (aceFilterMode === 'starred' && !star[ce.endpoint]) continue;
+		if (needle) {
+			var hay = [ce.endpoint, ce.ip || '', ce.country || '', ce.colo || '',
+				ce.node_city || '', ce.node_iso || '', COUNTRY_NAMES[(ce.country || '').toUpperCase()] || '']
+				.join(' ').toLowerCase();
+			if (hay.indexOf(needle) < 0) continue;
+		}
+		out.push(ce);
+	}
+	out.sort(function (a, b) {
+		var sa = star[a.endpoint] ? 1 : 0, sb = star[b.endpoint] ? 1 : 0;
+		if (sa !== sb) return sb - sa;
+		if (aceSortMode === 'name') return (a.endpoint < b.endpoint ? -1 : 1);
+		var la = aceLat(a), lb = aceLat(b);
+		if (la === lb) return (a.endpoint < b.endpoint ? -1 : 1);
+		return la - lb;
+	});
+	return out;
+}
+
+function aceLat(ce) {
+	return (ce.tun_ping_ms && ce.tun_ping_ms > 0) ? ce.tun_ping_ms
+		: ((ce.endpoint_ping_ms && ce.endpoint_ping_ms > 0) ? ce.endpoint_ping_ms : 0);
+}
+
+function aceBars(ms) {
+	if (ms <= 0) return 0;
+	if (ms < 100) return 3;
+	if (ms < 250) return 2;
+	return 1;
+}
+
+function aceRenderList() {
+	var rows = document.getElementById('rows');
+	var count = document.getElementById('count');
+
+	if (aceData && aceData.scanning) {
+		count.textContent = '正在扫描' + (aceData.scan_proto ? ' ' + aceData.scan_proto : '') + '…（后台进行中，几分钟）';
+	} else if (!aceData) {
+		count.textContent = '（加载中…）';
+	} else if (!aceData.results || !aceData.results.length) {
+		count.textContent = '缓存中暂无节点——点右上角「刷新扫描」，或先连接一次让引擎自动扫描';
+	} else {
+		var n = aceRows().length, starN = 0, k;
+		for (k in (aceData.starred || {})) starN++;
+		var when = (aceData.at || '').replace(/T.*$/, '') || '';
+		count.textContent = '共 ' + n + ' 个节点' + (starN ? ' · 已收藏 ' + starN + ' 个' : '')
+			+ (when ? ' · 扫描于 ' + when : '');
+	}
+
+	if (!aceData || !aceData.results || !aceData.results.length) {
+		rows.innerHTML = '<div class="ace-empty">缓存中暂无节点</div>';
+		return;
+	}
+
+	var list = aceRows(), html = '';
+	for (var i = 0; i < list.length; i++) {
+		var ce = list[i], ms = aceLat(ce), bars = aceBars(ms);
+		var iso = (ce.node_iso || ce.country || '').toUpperCase();
+		var active = aceData.pick === ce.endpoint;
+		var inUse = aceState && aceState.connected && aceState.endpoint === ce.endpoint;
+		var starred = !!(aceData.starred && aceData.starred[ce.endpoint]);
+		var city = ce.node_city ? ce.node_city + ' · ' : '';
+		var sub = iso ? (COUNTRY_NAMES[iso] || iso) : '—';
+		if (ce.colo) sub += ' · ' + ce.colo;
+		html += '<div class="ace-row' + (active || inUse ? ' active' : '') + '" onclick="acePin(\'' +
+			encodeURIComponent(ce.endpoint) + '\')">'
+			+ '<div class="flag">' + aceFlag(iso) + '</div>'
+			+ '<div class="nm"><div class="t">' + city + ce.endpoint + '</div><div class="s">' + sub + '</div></div>'
+			+ (inUse ? '<span class="tag">使用中</span>' : (active ? '<span class="tag">已选</span>' : ''))
+			+ '<button class="star' + (starred ? ' on' : '') + '" onclick="event.stopPropagation();aceStar(\'' +
+				encodeURIComponent(ce.endpoint) + '\',' + (starred ? 'false' : 'true') + ')">' + (starred ? '★' : '☆') + '</button>'
+			+ '<div class="lat">' + (ms > 0 ? ms + 'ms' : '—') + '</div>'
+			+ '<div class="bars">';
+		for (var b = 0; b < 3; b++) {
+			html += '<i style="height:' + (6 + b * 4) + 'px" class="' + (b < bars ? 'on' : '') + '"></i>';
+		}
+		html += '</div></div>';
+	}
+	rows.innerHTML = html;
+}
+
+function aceLoadState() {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_STATUS + '?t=' + Date.now(), true);
+	x.onload = function () { try { aceState = JSON.parse(x.responseText); } catch (e) {} };
+	x.send();
+}
+
+function aceLoad() {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_NODES + '?t=' + Date.now(), true);
+	x.onload = function () {
+		try { aceData = JSON.parse(x.responseText); } catch (e) { aceData = null; }
+		aceRenderList();
+		/* 扫描进行中：3 秒后自动再拉，完成后列表自动刷新 */
+		if (aceData && aceData.scanning) setTimeout(aceLoad, 3000);
+	};
+	x.send();
+}
+
+function acePost(body) {
+	var x = new XMLHttpRequest();
+	x.open('POST', ACE_PICK, true);
+	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+	x.onload = function () {
+		if (x.status !== 200) {
+			var d = null;
+			try { d = JSON.parse(x.responseText); } catch (e) {}
+			alert(d && d.error ? '操作失败：' + d.error : '操作失败（HTTP ' + x.status + '）');
+		}
+		aceLoad();
+	};
+	x.send(body + '&token=' + encodeURIComponent(ACE_TOKEN));
+}
+
+function acePin(epEnc) {
+	var ep = decodeURIComponent(epEnc);
+	var clear = aceData && aceData.pick === ep;
+	if (!clear && aceState && aceState.connected
+		&& !confirm('把 ' + ep + ' 设为默认出口并重建隧道？（约 10–20 秒）')) return;
+	var body = 'pick=' + (clear ? '' : encodeURIComponent(ep));
+	if (!clear && aceState && aceState.connected) body += '&apply=1';
+	acePost(body);
+}
+
+function aceStar(epEnc, on) {
+	acePost((on ? 'star=' : 'unstar=') + epEnc);
+}
+
+function aceScan() {
+	var btn = document.getElementById('scanBtn');
+	if (CUR_PROTO.indexOf('masque') === 0) {
+		alert('MASQUE 协议没有可选端点。要扫描端点请先把协议切到 AWG/WG/WARP-in-WARP。');
+		return;
+	}
+	if (!confirm('重新扫描端点池？（后台进行，通常需要几分钟，期间可以正常上网）')) return;
+	btn.disabled = true;
+	btn.textContent = '扫描中…';
+	var x = new XMLHttpRequest();
+	x.open('POST', ACE_SCAN, true);
+	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+	x.onloadend = function () {
+		btn.disabled = false;
+		btn.textContent = '⟳ 刷新扫描';
+		aceLoad();
+	};
+	x.send('proto=' + encodeURIComponent(CUR_PROTO) + '&token=' + encodeURIComponent(ACE_TOKEN));
+}
+
+aceLoadState();
+aceLoad();
+</script>
+
+<%+footer%>
