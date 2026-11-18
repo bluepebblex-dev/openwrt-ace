@@ -130,8 +130,8 @@
 		<label class="ace-picker" id="exitPicker" style="display:none">
 			<span class="ic">🌍</span>
 			<span>
-				<span class="lbl">出口地区</span><br>
-				<input type="text" id="f-region" maxlength="2" placeholder="自动">
+				<span class="lbl">VPN Gate 出口</span><br>
+				<select id="f-region"></select>
 			</span>
 		</label>
 	</div>
@@ -194,8 +194,10 @@
 	<div class="ace-log" id="log">（加载中…）</div>
 
 	<div class="ace-note">
-		连接后整个局域网的流量会经由 WARP 出口；DNS 由内核接管，断开时自动还原。
-		协议与出口地区在首页改完立即保存，已连接时重建隧道（约 10–20 秒）。
+		连接后整个局域网的流量会经由 WARP 出口；开启 OpenVPN 出口时再经 VPN Gate 公共节点，出口国家更可控但速度更慢。
+		DNS 由内核接管，断开时自动还原。<br>
+		协议与出口地区在首页改完立即保存，已连接时重建隧道（约 10–20 秒）。<b>OpenVPN 出口首次建链需要 1–3 分钟</b>：
+		节点列表要从 VPN Gate 拉取，再逐个试连，进度可以看下面的日志。
 	</div>
 </div>
 
@@ -217,6 +219,29 @@ var COUNTRY_NAMES = {
 	TH: '泰国', SG: '新加坡', US: '美国', DE: '德国', GB: '英国', FR: '法国',
 	NL: '荷兰', CA: '加拿大', AU: '澳大利亚', SE: '瑞典', FI: '芬兰', CH: '瑞士'
 };
+
+/* VPN Gate 出口地区。和设置页同一份清单；空值表示自动挑延迟最低的。 */
+var ACE_COUNTRIES = [
+	['', '自动'], ['JP', '🇯🇵 日本'], ['KR', '🇰🇷 韩国'], ['TH', '🇹🇭 泰国'],
+	['TW', '🇨🇳 中国台湾'], ['HK', '🇨🇳 中国香港'], ['SG', '🇸🇬 新加坡'],
+	['US', '🇺🇸 美国'], ['CA', '🇨🇦 加拿大'], ['GB', '🇬🇧 英国'],
+	['DE', '🇩🇪 德国'], ['FR', '🇫🇷 法国'], ['NL', '🇳🇱 荷兰'],
+	['SE', '🇸🇪 瑞典'], ['FI', '🇫🇮 芬兰'], ['CH', '🇨🇭 瑞士'],
+	['IT', '🇮🇹 意大利'], ['ES', '🇪🇸 西班牙'], ['PL', '🇵🇱 波兰'],
+	['RU', '🇷🇺 俄罗斯'], ['TR', '🇹🇷 土耳其'], ['IN', '🇮🇳 印度'],
+	['ID', '🇮🇩 印尼'], ['VN', '🇻🇳 越南'], ['AU', '🇦🇺 澳大利亚'],
+	['BR', '🇧🇷 巴西'], ['ZA', '🇿🇦 南非'], ['AE', '🇦🇪 阿联酋']
+];
+
+(function () {
+	var sel = document.getElementById('f-region');
+	for (var i = 0; i < ACE_COUNTRIES.length; i++) {
+		var o = document.createElement('option');
+		o.value = ACE_COUNTRIES[i][0];
+		o.textContent = ACE_COUNTRIES[i][1];
+		sel.appendChild(o);
+	}
+})();
 
 function aceFlag(iso) {
 	if (!iso || iso.length !== 2) return '🌐';
@@ -248,13 +273,18 @@ function aceFmtRate(b) {
 function aceRender(d) {
 	var knob = document.getElementById('knob');
 
-	/* 内核缺失时连接一定失败——把原因和入口摆在按钮上面，别让人看日志猜 */
+	/* 内核缺失时连接一定失败——把原因和入口摆在按钮上面，别让人看日志猜。
+	   OpenVPN 出口还多一种失败：内核存在但太旧，没有 openvpn 出站。 */
 	var warn = document.getElementById('coreWarn');
 	if (d.core && !d.core.ok) {
 		warn.style.display = '';
 		document.getElementById('coreWarnText').textContent = d.core_installing
 			? '正在下载 mihomo 内核，完成后自动可用…'
 			: '未检测到 mihomo 内核，点连接会失败。';
+	} else if (d.core && d.core.openvpn === false && ACE_CUR.ovpn === '1') {
+		warn.style.display = '';
+		document.getElementById('coreWarnText').textContent =
+			'当前内核 ' + (d.core.version || '') + ' 不支持 OpenVPN 出口（需 v1.19.32+），点连接会失败。';
 	} else {
 		warn.style.display = 'none';
 	}
@@ -302,8 +332,11 @@ function aceRender(d) {
 	var iso = (d.country || '').toUpperCase();
 	var nm = COUNTRY_NAMES[iso] || iso || '—';
 	if (d.connected) {
-		document.getElementById('cCountry').textContent =
-			nm + (d.colo ? ' · ' + d.colo : (iso ? ' · ' + iso : ''));
+		/* OpenVPN 出口时 colo 是底座的 Cloudflare 机房，和用户看到的出口无关，
+		   所以这里换成「VPN Gate · 国家 · 城市」——节点实际落在哪。 */
+		document.getElementById('cCountry').textContent = d.openvpn
+			? 'VPN Gate · ' + nm + (d.city ? ' · ' + d.city : '')
+			: nm + (d.colo ? ' · ' + d.colo : (iso ? ' · ' + iso : ''));
 		document.getElementById('cFlag').textContent = aceFlag(iso);
 	} else {
 		document.getElementById('cCountry').textContent = '中国 · CN';
@@ -385,7 +418,13 @@ function aceSaveField(key, val) {
 		if (x.status === 200) {
 			aceToast(needRestart ? '已保存，正在重建隧道…' : '已保存，下次连接生效');
 		} else {
-			aceToast('保存失败（HTTP ' + x.status + '）');
+			var d = null;
+			try { d = JSON.parse(x.responseText); } catch (e) {}
+			if (d && d.error === 'openvpn_chain') {
+				aceToast('OpenVPN 出口不能叠加链式协议，请先在设置页关掉它');
+			} else {
+				aceToast('保存失败（HTTP ' + x.status + '）');
+			}
 			aceFillPickers();
 		}
 		acePoll();
@@ -396,7 +435,14 @@ function aceSaveField(key, val) {
 var ACE_CUR = { proto: '<%=cur_proto%>', region: '<%=cur_region%>', ovpn: '<%=cur_ovpn%>' };
 function aceFillPickers() {
 	document.getElementById('f-proto').value = ACE_CUR.proto;
-	document.getElementById('f-region').value = ACE_CUR.region;
+	var sel = document.getElementById('f-region');
+	var v = (ACE_CUR.region || '').toUpperCase();
+	if (v && !sel.querySelector('option[value="' + v + '"]')) {
+		var o = document.createElement('option');
+		o.value = v; o.textContent = v;
+		sel.appendChild(o);
+	}
+	sel.value = v;
 	document.getElementById('exitPicker').style.display = ACE_CUR.ovpn === '1' ? '' : 'none';
 }
 document.getElementById('f-proto').onchange = function () {
@@ -404,8 +450,7 @@ document.getElementById('f-proto').onchange = function () {
 	ACE_CUR.proto = this.value;
 };
 document.getElementById('f-region').onchange = function () {
-	var v = this.value.trim().toUpperCase();
-	if (v && !/^[A-Z][A-Z]$/.test(v)) { aceToast('出口地区填两位国家代码（如 JP）'); aceFillPickers(); return; }
+	var v = (this.value || '').toUpperCase();
 	aceSaveField('openvpn_region', v);
 	ACE_CUR.region = v;
 };

@@ -140,6 +140,9 @@ end
 local CORE_DIR = "/etc/ace/core"
 local CORE_FLAG = "/var/run/ace-core-installing"
 local CORE_LOG = "/var/log/ace-core.log"
+-- probe 结果按 (path, size, mtime) 缓存：一次 probe 要跑八次 mihomo -t（约 3 秒），
+-- 而 api_status 每 2.5 秒被轮询一次，不缓存等于把 CPU 钉在配置解析上。
+local PROBE_CACHE = "/var/run/ace-probe.json"
 
 -- 是否是一个可执行文件：返回字节数，不是就返回 nil。
 -- 不能用 st.mode 判断——这台 ImmortalWrt 的 nixio 精简编译里 stat().mode 是 nil
@@ -158,6 +161,39 @@ local function is_exe(p)
 	return st.size or 0
 end
 
+-- 内核能力：这个二进制能不能跑 OpenVPN 出站。
+-- 「内核存在」和「内核支持 OpenVPN 出站」是两件事：ImmortalWrt 24.10 自带的
+-- mihomo v1.19.12 接受全部 WARP 协议，但拒绝 type: openvpn，连接时看起来像
+-- 节点问题（握手失败/速度为零），实际上是内核太旧。用引擎自己的 probe 问一次。
+local function core_probe(path, size)
+	local st = fs.stat(path)
+	local mtime = st and (st.mtime or 0) or 0
+	local cached = nil
+	local raw = fs.readfile(PROBE_CACHE)
+	if raw and raw ~= "" then
+		local ok, t = pcall(function() return require("luci.jsonc").parse(raw) end)
+		if ok and type(t) == "table" and t.path == path and t.size == size and t.mtime == mtime then
+			cached = t
+		end
+	end
+	if cached then
+		return cached
+	end
+
+	local out = sys.exec("/usr/bin/ace-engine probe -core " .. shq(path) .. " 2>/dev/null")
+	local res = { path = path, size = size, mtime = mtime, openvpn = false, version = "" }
+	if out and out ~= "" then
+		local ok, t = pcall(function() return require("luci.jsonc").parse(out) end)
+		if ok and type(t) == "table" then
+			res.openvpn = t.openvpn == true
+			res.version = t.version or ""
+			res.proto = t.proto
+		end
+	end
+	fs.writefile(PROBE_CACHE, require("luci.jsonc").stringify(res) .. "\n")
+	return res
+end
+
 local function core_state()
 	local c = cursor()
 	local want = c:get("ace", "main", "core") or ""
@@ -165,16 +201,29 @@ local function core_state()
 	if want == "" then
 		want = "/usr/bin/mihomo"
 	end
-	local sz = is_exe(want)
-	if sz then
-		return { ok = true, path = want, src = "system", size = sz }
-	end
+	-- 顺序必须和引擎一致：EnsureBinary 先看 <home>/core/mihomo（下载版），
+	-- 再回落到 -core 指定的路径。反过来的话界面会说「用着系统版」，
+	-- 实际跑的是下载版，版本能力对不上。
 	local dl = CORE_DIR .. "/mihomo"
-	sz = is_exe(dl)
+	local sz = is_exe(dl)
+	local st
 	if sz then
-		return { ok = true, path = dl, src = "downloaded", size = sz }
+		st = { ok = true, path = dl, src = "downloaded", size = sz, want = want }
+	else
+		sz = is_exe(want)
+		if sz then
+			st = { ok = true, path = want, src = "system", size = sz }
+		else
+			return { ok = false, path = dl, src = "none", size = 0, want = want }
+		end
 	end
-	return { ok = false, path = dl, src = "none", size = 0, want = want }
+	local p = core_probe(st.path, st.size)
+	st.version = p.version
+	st.openvpn = p.openvpn
+	-- 旧内核缺的不止 OpenVPN：MASQUE 出站也是 v1.19.2x 之后才有。界面据此
+	-- 提前说清「这个协议在现内核上跑不起来」，而不是让人对着握手失败猜。
+	st.proto = p.proto
+	return st
 end
 
 function api_status()
@@ -404,6 +453,18 @@ function api_save()
 		http.status(400, "Bad Request")
 		http.prepare_content("application/json")
 		http.write_json({ ok = false, invalid = errs })
+		return
+	end
+
+	-- OpenVPN 出口是「基础协议之上再挂一层 mihomo openvpn 出站」，链式协议
+	-- （wwarp / masque-mm）本身已经是两层，再叠一层引擎会直接拒绝。这里提前
+	-- 拦下并说清原因，比「保存成功、连接时失败」好。
+	local ovpn = pending_vals.openvpn or c:get("ace", "main", "openvpn")
+	local proto = pending_vals.proto or c:get("ace", "main", "proto")
+	if ovpn == "1" and (proto == "wwarp" or proto == "masque-mm") then
+		http.status(400, "Bad Request")
+		http.prepare_content("application/json")
+		http.write_json({ ok = false, error = "openvpn_chain", invalid = { "openvpn" } })
 		return
 	end
 
