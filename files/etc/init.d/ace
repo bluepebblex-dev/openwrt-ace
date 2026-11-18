@@ -285,8 +285,12 @@ start_service() {
 	aport=$(cfg_get api_port); aport=${aport:-9090}
 	core=$(cfg_get core); core=${core:-/usr/bin/mihomo}
 
-	# 上一轮如果没清干净，先收一遍，否则内核抢不到端口
+	# 上一轮如果没清干净（被 kill -9、断电、或 stop 没跑完），先收一遍，
+	# 否则内核抢不到端口 —— 真机上表现为每轮 connect 直接 "port in use" 失败。
+	kill_guard
+	kill_connect
 	[ -x "$ACE_BIN" ] && "$ACE_BIN" disconnect -mixed-port "$mport" -core "$core" >/dev/null 2>&1
+	kill_core
 
 	procd_open_instance ace
 	procd_set_param command /usr/share/ace/run.sh
@@ -318,6 +322,89 @@ start_service() {
 	fi
 }
 
+# ---------------------------------------------------------------- 停止兜底
+# 2026-11-18 事故：openvpn 试跑后点「停止」无效，最后人工 kill 进程才恢复。
+# 三处漏网，全部来自「收尾依赖某个进程正常退出」：
+#   1. guard 看守进程不是 procd 的子进程，stop 碰不到它；它发现会话没数据面
+#      就去轮换端点重建会话 —— 于是隧道自己又起来了，用户看到的就是「停不掉」。
+#   2. mihomo 被强杀后变孤儿，继续占着 7890/9090，之后每轮 connect 都报
+#      "port in use"，形成一直失败一直占资源的死循环。
+#   3. dnsmasq 上游停在 127.0.0.1#7874，而 7874 已无人监听 —— 全屋 DNS 瘫痪，
+#      比断网更狠，连管理页都打不开。原来只在 dns_takeover=1 时还原，
+#      且挂在 disconnect 正常返回之后，进程被 kill -9 就永远不会执行。
+# 这四步必须自己做、必须幂等、必须与 disconnect 成功与否无关。
+
+# 按命令行找 pid。用 [x] 写法，避免 grep 匹配到执行这段脚本的 shell 自己。
+pid_match() {
+	ps w 2>/dev/null | grep "$1" | grep -v grep | awk '{print $1}'
+}
+
+kill_guard() {
+	local p
+	for p in $(pid_match "[a]ce-engine guard"); do
+		kill -9 "$p" 2>/dev/null && logger -t ace "已终止残留的 guard 进程 $p"
+	done
+	# 归属文件留着会让下一次 connect 认为「已有人负责健康检查」而不再起守护
+	rm -f "$ACE_HOME/.health-owner" /var/run/ace-health-owner 2>/dev/null
+}
+
+# 主进程自己走 TERM：引擎收到信号后会跑收尾（删 TUN、停内核、清状态），
+# 比外面 kill -9 干净得多。只有它卡住不退才强杀。
+# 为什么 stop 要管这个：procd 只停它自己记录的实例，而端口/参数与 uci 不一致的
+# 实例（手工调试起的、改过端口后残留的）procd 根本不认识，光靠 disconnect 也
+# 匹配不到 —— 真机验证时 connect 就这么活下来了。
+kill_connect() {
+	local p i=0
+	for p in $(pid_match "[a]ce-engine connect"); do
+		kill "$p" 2>/dev/null
+	done
+	while [ "$i" -lt 6 ]; do
+		[ -z "$(pid_match "[a]ce-engine connect")" ] && return 0
+		i=$((i + 1)); sleep 0.5
+	done
+	for p in $(pid_match "[a]ce-engine connect"); do
+		kill -9 "$p" 2>/dev/null && logger -t ace "connect 未在 3 秒内退出，强制终止 $p"
+	done
+}
+
+kill_core() {
+	local p cmd
+	for p in $(pid_match "[m]ihomo"); do
+		# busybox 的 tr 只认八进制转义，"\0" 在部分版本上会被当字面量
+		cmd=$(tr '\000' ' ' < "/proc/$p/cmdline" 2>/dev/null)
+		# 只杀本服务起的：命令行里必须带 ace 的工作目录，用户自己的 mihomo 不碰
+		case "$cmd" in
+			*ace*)
+				kill -9 "$p" 2>/dev/null && logger -t ace "已终止残留的内核进程 $p"
+				;;
+		esac
+	done
+}
+
+cleanup_routes() {
+	# TUN 留着就会把整屋流量导进黑洞，而且比断网更难查（能 ping 网关、别的一概不通）
+	if ip link show "$TUN_DEV" >/dev/null 2>&1; then
+		ip link del "$TUN_DEV" 2>/dev/null && logger -t ace "已删除残留隧道设备 $TUN_DEV"
+	fi
+	# 内核 auto-route 建的策略路由指向 table 2022。TUN 设备被删时路由会跟着走，
+	# 但 ip rule 不会 —— 残留规则留着会让流量去查一张空表。
+	local pref
+	for pref in $(ip rule show 2>/dev/null | awk '$0 ~ /lookup 2022/ {sub(":", "", $1); print $1}'); do
+		ip rule del pref "$pref" 2>/dev/null && logger -t ace "已删除残留策略路由 $pref"
+	done
+}
+
+# 不看备份文件，只看现状：上游还指着本服务的解析器端口，就说明接管没退干净。
+# 这一条是兜底里的兜底 —— dns.bak 可能没写成功，也可能被上一次崩溃吃掉。
+dns_panic_restore() {
+	uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | grep -q "127.0.0.1#$DNS_PORT" || return 0
+	logger -t ace "dnsmasq 仍指向已停止的解析器，强制还原上游"
+	uci -q delete dhcp.@dnsmasq[0].server
+	uci -q delete dhcp.@dnsmasq[0].noresolv
+	uci -q commit dhcp
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+}
+
 stop_service() {
 	# 拿不到锁必须报错而不是当成功：否则 LuCI 显示已断开、实际隧道还在跑
 	take_lock || { logger -t ace "ace: 无法获取锁，停止失败，请稍后重试"; return 1; }
@@ -325,11 +412,19 @@ stop_service() {
 	mport=$(cfg_get mixed_port); mport=${mport:-7890}
 	core=$(cfg_get core); core=${core:-/usr/bin/mihomo}
 
-	# 先正常断开：停内核、清端口、还原系统状态
+	# 第一件事就是掐看守进程。放在 disconnect 之后会被它抢先重建会话。
+	kill_guard
+	# 再让主进程自己退：它跑完收尾，TUN 和内核就顺带清掉了
+	kill_connect
+
+	# 正常断开：清端口、还原系统状态（主进程已退时这里主要是补状态文件）
 	[ -x "$ACE_BIN" ] && "$ACE_BIN" disconnect -mixed-port "$mport" -core "$core" >/dev/null 2>&1
 
-	# 内核被强杀时 disconnect 可能没跑完收尾，这里补齐
-	is_on dns_takeover && dns_restore
+	# 以下全部幂等，且不依赖上面是否成功
+	kill_core
+	cleanup_routes
+	[ -f "$DNS_BAK" ] && dns_restore
+	dns_panic_restore
 	fw_zone_del
 	rm -f "$WATCH_FLAG"
 	drop_lock
