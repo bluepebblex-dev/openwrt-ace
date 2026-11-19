@@ -85,6 +85,39 @@
 	.ace-tp .v { font-size: 14.5px; font-weight: 600; margin-top: 2px; }
 	.ace-tp .tot { font-size: 10px; opacity: .55; margin-top: 3px; }
 
+	/* 链路卡片 + 瓶颈提示 */
+	.ace-link {
+		display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 12px 15px;
+		background: rgba(127,127,127,.10); border: 1px solid rgba(127,127,127,.16);
+		border-radius: 13px; min-width: 0;
+	}
+	.ace-link .badge {
+		flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%;
+		background: rgba(74,124,192,.18); display: flex; align-items: center; justify-content: center;
+		font-size: 16px;
+	}
+	.ace-link .k { font-size: 10.5px; opacity: .6; letter-spacing: .3px; }
+	.ace-link .v { font-size: 13px; font-weight: 600; margin-top: 2px; word-break: break-all; line-height: 1.35; }
+	.ace-link .hintline { font-size: 11px; opacity: .62; margin-top: 4px; line-height: 1.4; }
+	.ace-hint {
+		margin-top: 12px; padding: 10px 14px; border-radius: 10px; font-size: 12.5px; line-height: 1.5;
+		background: rgba(240,180,41,.12); border: 1px solid rgba(240,180,41,.4);
+	}
+	.ace-hint.ok { background: rgba(46,125,82,.10); border-color: rgba(46,125,82,.35); }
+	.ace-hint.slow { background: rgba(216,90,48,.10); border-color: rgba(216,90,48,.4); }
+
+	/* 流量走势 */
+	.ace-spark { display: block; width: 100%; height: 34px; margin-top: 8px; }
+
+	/* 诊断结果 */
+	.ace-diag { margin-top: 12px; border: 1px solid rgba(127,127,127,.18); border-radius: 12px; overflow: hidden; }
+	.ace-diag .row { display: flex; gap: 11px; padding: 9px 14px; font-size: 12px; line-height: 1.45; }
+	.ace-diag .row + .row { border-top: 1px solid rgba(127,127,127,.12); }
+	.ace-diag .dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; background: #2e7d52; }
+	.ace-diag .row.bad .dot { background: #d85a30; }
+	.ace-diag .lb { font-weight: 600; min-width: 108px; }
+	.ace-diag .dt { opacity: .72; word-break: break-all; }
+
 	.ace-log-head { display: flex; align-items: center; justify-content: space-between; margin: 22px 0 8px; }
 	.ace-log {
 		background: #0d1117; color: #c9d1d9; border-radius: 12px; padding: 12px 14px;
@@ -168,29 +201,44 @@
 		</div>
 	</div>
 
+	<div class="ace-link" id="linkCard">
+		<div class="badge">⛓</div>
+		<div style="min-width:0;flex:1">
+			<div class="k">当前链路</div>
+			<div class="v" id="linkChain">—</div>
+			<div class="hintline" id="linkHint">连接后显示承载端点与出口节点</div>
+		</div>
+	</div>
+
+	<div class="ace-hint" id="bottleneck" style="display:none"></div>
+
 	<div class="ace-traffic">
 		<div class="ace-tp up">
 			<div class="head">
 				<div class="ic">↑</div>
 				<div><div class="k">上传</div><div class="v" id="tUp">—</div><div class="tot" id="tUpTot"></div></div>
 			</div>
+			<canvas class="ace-spark" id="sparkUp" width="400" height="34"></canvas>
 		</div>
 		<div class="ace-tp down">
 			<div class="head">
 				<div class="ic">↓</div>
 				<div><div class="k">下载</div><div class="v" id="tDown">—</div><div class="tot" id="tDownTot"></div></div>
 			</div>
+			<canvas class="ace-spark" id="sparkDown" width="400" height="34"></canvas>
 		</div>
 	</div>
 
 	<div class="ace-log-head">
 		<strong style="font-size:13px">运行日志</strong>
 		<div class="ace-actions">
+			<button class="btn cbi-button" id="diagBtn" onclick="aceDiagnose()">一键诊断</button>
 			<button class="btn cbi-button" onclick="aceLoadLog()">刷新</button>
 			<button class="btn cbi-button" onclick="aceClearLog()">清除日志</button>
 			<a class="btn cbi-button" href="<%=url('admin/services/ace/settings')%>">设置</a>
 		</div>
 	</div>
+	<div class="ace-diag" id="diagBox" style="display:none"></div>
 	<div class="ace-log" id="log">（加载中…）</div>
 
 	<div class="ace-note">
@@ -208,10 +256,13 @@ var ACE_STATUS = '<%=url("admin/services/ace/api/status")%>';
 var ACE_ACTION = '<%=url("admin/services/ace/api/action")%>';
 var ACE_LOG = '<%=url("admin/services/ace/api/log")%>';
 var ACE_SAVE = '<%=url("admin/services/ace/api/save")%>';
+var ACE_DIAG = '<%=url("admin/services/ace/api/diagnose")%>';
 var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var aceBusy = false;
 var aceLast = null;   /* 上一次 status（流量速率用总量差算） */
 var aceLastT = 0;
+var aceSparkUp = [], aceSparkDown = [];   /* 流量速率采样，最多 40 点 */
+var SPARK_MAX = 40;
 
 /* 常用出口国（桌面端 CountryNames 同款语义，HK/TW/MO 按中国地区名显示） */
 var COUNTRY_NAMES = {
@@ -270,6 +321,40 @@ function aceFmtRate(b) {
 	return (b / 1048576).toFixed(1) + ' MB/s';
 }
 
+/* 流量走势：把采样数组画成填充折线。纵轴按本窗口最大值归一，断连时清空。 */
+function aceDrawSpark(id, data, color) {
+	var cv = document.getElementById(id), ctx = cv.getContext('2d');
+	var w = cv.width, h = cv.height;
+	ctx.clearRect(0, 0, w, h);
+	if (!data.length) return;
+	var max = 1;
+	for (var i = 0; i < data.length; i++) if (data[i] > max) max = data[i];
+	var step = w / (SPARK_MAX - 1);
+	var x0 = w - (data.length - 1) * step;
+	ctx.beginPath();
+	ctx.moveTo(x0, h - 1);
+	for (var j = 0; j < data.length; j++) {
+		var x = x0 + j * step;
+		var y = h - 2 - (data[j] / max) * (h - 5);
+		ctx.lineTo(x, y);
+	}
+	ctx.lineTo(x0 + (data.length - 1) * step, h - 1);
+	ctx.closePath();
+	ctx.fillStyle = color;
+	ctx.globalAlpha = .18;
+	ctx.fill();
+	ctx.globalAlpha = 1;
+	ctx.beginPath();
+	for (var k = 0; k < data.length; k++) {
+		var xx = x0 + k * step;
+		var yy = h - 2 - (data[k] / max) * (h - 5);
+		if (k === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+	}
+	ctx.strokeStyle = color;
+	ctx.lineWidth = 1.5;
+	ctx.stroke();
+}
+
 function aceRender(d) {
 	var knob = document.getElementById('knob');
 
@@ -294,10 +379,19 @@ function aceRender(d) {
 		var dt = (Date.now() - aceLastT) / 1000;
 		var up = d.up_total - aceLast.up_total, down = d.down_total - aceLast.down_total;
 		if (dt > 0 && up >= 0 && down >= 0) {
-			document.getElementById('tUp').textContent = aceFmtRate(Math.round(up / dt));
-			document.getElementById('tDown').textContent = aceFmtRate(Math.round(down / dt));
+			var upRate = Math.round(up / dt), downRate = Math.round(down / dt);
+			document.getElementById('tUp').textContent = aceFmtRate(upRate);
+			document.getElementById('tDown').textContent = aceFmtRate(downRate);
+			if (d.connected) {
+				aceSparkUp.push(upRate); aceSparkDown.push(downRate);
+				if (aceSparkUp.length > SPARK_MAX) aceSparkUp.shift();
+				if (aceSparkDown.length > SPARK_MAX) aceSparkDown.shift();
+			}
 		}
 	}
+	if (!d.connected) { aceSparkUp = []; aceSparkDown = []; }
+	aceDrawSpark('sparkUp', aceSparkUp, '#2e7d52');
+	aceDrawSpark('sparkDown', aceSparkDown, '#4a7cc0');
 	aceLast = d; aceLastT = Date.now();
 	if (d.connected && d.up_total !== undefined) {
 		document.getElementById('tUpTot').textContent = '累计 ' + aceFmtSize(d.up_total);
@@ -344,6 +438,36 @@ function aceRender(d) {
 	}
 	document.getElementById('cLatency').textContent = d.latency ? (d.latency + ' ms') : '—';
 	document.getElementById('cExit').textContent = d.exit_ip || '—';
+
+	/* 当前链路卡片：承载端点 → 出口节点，一眼看清流量走的哪条路 */
+	var chainEl = document.getElementById('linkChain');
+	var hintEl = document.getElementById('linkHint');
+	var bnEl = document.getElementById('bottleneck');
+	if (d.connected) {
+		var ep = d.endpoint || '（端点未知）';
+		var protoName = d.proto || '—';
+		chainEl.textContent = 'WARP ' + protoName + ' · ' + ep
+			+ (d.openvpn ? '  →  VPN Gate ' + (d.openvpn_region || '自动') : '');
+		hintEl.textContent = d.openvpn
+			? '双层链路：WARP 承载 → VPN Gate 出口，慢属正常'
+			: '单层链路：WARP 直出';
+		/* 瓶颈提示：按已有字段判断，纯文案，不改任何状态 */
+		var cls = 'ace-hint ok', msg = '';
+		if (d.latency && d.latency >= 500) {
+			cls = 'ace-hint slow';
+			msg = '延迟 ' + d.latency + ' ms 偏高，瓶颈多在出口节点；换个出口地区或重连通常有效。';
+		} else if (d.openvpn) {
+			msg = 'OpenVPN 出口经 VPN Gate 公共节点，速度受节点影响大 —— 慢不是故障，是这类出口的固有代价。';
+		} else {
+			msg = '链路正常。round-robin 按新连接分摊，单个长连接不会因为叠加变快。';
+		}
+		if (msg) { bnEl.textContent = msg; bnEl.className = cls; bnEl.style.display = ''; }
+		else { bnEl.style.display = 'none'; }
+	} else {
+		chainEl.textContent = '—';
+		hintEl.textContent = '连接后显示承载端点与出口节点';
+		bnEl.style.display = 'none';
+	}
 }
 
 function acePoll() {
@@ -367,7 +491,6 @@ function aceLoadLog() {
 }
 
 function aceClearLog() {
-	if (!confirm('确定清除运行日志？清除后面板里只剩之后的输出。')) return;
 	var x = new XMLHttpRequest();
 	x.open('POST', ACE_ACTION, true);
 	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
@@ -379,12 +502,42 @@ function aceClearLog() {
 	x.send('action=clearlog&token=' + encodeURIComponent(ACE_TOKEN));
 }
 
+/* 一键诊断：只读体检，后端绝不碰连接/TUN/路由/DNS。 */
+function aceDiagnose() {
+	var btn = document.getElementById('diagBtn');
+	var box = document.getElementById('diagBox');
+	btn.disabled = true;
+	box.style.display = '';
+	box.innerHTML = '<div class="row"><div class="dot"></div><div class="dt">正在体检…</div></div>';
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_DIAG + '?t=' + Date.now(), true);
+	x.onload = function () {
+		btn.disabled = false;
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) {}
+		if (!d || !d.rows) {
+			box.innerHTML = '<div class="row bad"><div class="dot"></div><div class="dt">诊断接口无响应</div></div>';
+			return;
+		}
+		var html = '';
+		for (var i = 0; i < d.rows.length; i++) {
+			var r = d.rows[i];
+			html += '<div class="row' + (r.ok ? '' : ' bad') + '">'
+				+ '<div class="dot"></div>'
+				+ '<div class="lb">' + r.label + '</div>'
+				+ '<div class="dt">' + r.detail + '</div></div>';
+		}
+		box.innerHTML = html;
+	};
+	x.onerror = function () {
+		btn.disabled = false;
+		box.innerHTML = '<div class="row bad"><div class="dot"></div><div class="dt">诊断请求失败</div></div>';
+	};
+	x.send();
+}
+
 function aceToggle() {
-	if (aceBusy) {
-		if (!confirm('连接还在进行中，确定取消并断开？')) return;
-	} else {
-		if (document.getElementById('knob')._connected && !confirm('确定断开？断开后整屋流量恢复直连。')) return;
-	}
+	/* 断开直接执行，不再弹确认：状态卡和日志已经足够反馈，多一次点击反而碍事。 */
 	aceBusy = true;
 	acePoll();
 

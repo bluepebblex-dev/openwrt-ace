@@ -28,6 +28,7 @@ function index()
 
 	entry({"admin", "services", "ace", "settings"}, template("ace/settings"), _("设置"), 10)
 	entry({"admin", "services", "ace", "api", "status"}, call("api_status")).leaf = true
+	entry({"admin", "services", "ace", "api", "diagnose"}, call("api_diagnose")).leaf = true
 	entry({"admin", "services", "ace", "api", "action"}, call("api_action")).leaf = true
 	entry({"admin", "services", "ace", "api", "log"}, call("api_log")).leaf = true
 	entry({"admin", "services", "ace", "api", "settings"}, call("api_settings")).leaf = true
@@ -342,6 +343,76 @@ function api_status()
 
 	http.prepare_content("application/json")
 	http.write_json(out)
+end
+
+-- 一键诊断：只读体检，绝不改任何运行状态。
+-- 设计约束（事故后定死）：这个函数里没有 sys.call 写操作、没有 init.d、
+-- 不碰 TUN / 路由 / DNS / 连接。全部是 stat / cat / 查询命令，点一百次
+-- 也不会断网——上次「试一下」把全屋搞崩的教训就在这里。
+-- 每项给 { ok = bool, label, detail }，前端照着着色，不做二次判断。
+function api_diagnose()
+	local rows = {}
+	local function add(ok, label, detail)
+		rows[#rows + 1] = { ok = ok and true or false, label = label, detail = detail or "" }
+	end
+
+	local st = read_state() or {}
+
+	-- 1. 内核是否可用（复用 core_state，探测结果有缓存，不会卡住页面）
+	local core = core_state()
+	add(core.ok, "内核文件",
+		core.ok and (core.version ~= "" and "v" .. core.version .. " · " .. core.path or core.path)
+			or "未找到可执行的 mihomo，点连接会失败")
+
+	-- 2. 内核能力：当前开的出口，内核是否支持
+	local want_ovpn = (cursor():get("ace", "main", "openvpn") or "0") == "1"
+	if want_ovpn then
+		add(core.openvpn == true, "OpenVPN 出口能力",
+			core.openvpn and "内核支持 type: openvpn 出站"
+				or "内核不支持 OpenVPN 出站，需 v1.19.32+；当前点连接会在握手阶段失败")
+	end
+
+	-- 3. 服务与核心进程
+	local running = st.connected and pid_alive(st.core_pid)
+	add(running == true, "服务状态",
+		running and "会话在线（核心 pid " .. tostring(st.core_pid) .. "）"
+			or (st.connected and "状态文件说已连接，但核心进程不在 —— 异常，建议断开重连"
+				or "未连接（正常空闲态）"))
+
+	-- 4. TUN 设备：连着的时候 ace0 应该在
+	local tun_up = fs.access("/sys/class/net/ace0") ~= nil
+	if running then
+		add(tun_up, "TUN 设备",
+			tun_up and "ace0 已建立" or "ace0 不存在，但会话标记在线 —— 检查是否走了纯代理模式")
+	end
+
+	-- 5. 控制器可达：mihomo 的本地 API 是数据面的晴雨表
+	local aport = cursor():get("ace", "main", "api_port") or "9090"
+	local conn = sys.exec("wget -q -T 2 -O- http://127.0.0.1:" .. aport .. "/connections 2>/dev/null")
+	local ctl_ok = conn and conn ~= ""
+	add(ctl_ok and true or false, "本地控制器",
+		ctl_ok and "mihomo 控制接口响应正常（port " .. aport .. "）"
+			or "控制接口无响应 —— 空闲未连接时属正常，已连接时说明核心可能卡住")
+
+	-- 6. DNS 现状：只读取 UCI 的 dnsmasq 上游，看是否还挂在内核的 7874 上。
+	--    接管写在 dhcp.@dnsmasq[0].server，不在 /etc/resolv.conf，读错文件会误报。
+	local upstream = sys.exec("uci -q get dhcp.@dnsmasq[0].server 2>/dev/null") or ""
+	local dns_hijack = upstream:find("127%.0%.0%.1#7874", 1, true) ~= nil
+	add(true, "DNS 配置（只读）",
+		dns_hijack and "dnsmasq 上游指向 127.0.0.1#7874，DNS 正由内核接管"
+			or "dnsmasq 上游为系统默认（直连态；断开后应为此状态）")
+
+	-- 7. 出口链路摘要
+	if running then
+		local ep = st.endpoint or ""
+		local chain = st.openvpn_mode
+			and ("WARP " .. ep .. " → VPN Gate " .. (st.openvpn_region or ""))
+			or ("WARP " .. ep)
+		add(true, "当前链路", chain)
+	end
+
+	http.prepare_content("application/json")
+	http.write_json({ rows = rows, at = os.time() })
 end
 
 function api_action()
