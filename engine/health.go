@@ -217,6 +217,33 @@ func judgeHealth(fails int, ok bool) healthVerdict {
 	return healthVerdict{fails: 0, repair: true}
 }
 
+// localLinkMoving reports whether the core's own counters show bytes actually
+// flowing through the tunnel. This is the fast, external-network-free half of
+// the data-plane check: mihomo answers /traffic locally, and a link that is
+// merely slow (so an external HTTPS probe times out) still moves bytes, which
+// this sees. The instantaneous rate catches active transfers; the cumulative
+// total catches slow trickles between samples.
+//
+// prev is the sample from the previous guard tick. On the first observation
+// there is no previous sample, so only the rates are usable.
+func localLinkMoving(prev, cur core.TrafficSample, havePrev bool) bool {
+	if cur.UpBps > 0 || cur.DownBps > 0 {
+		return true
+	}
+	return havePrev && (cur.UpTotal+cur.DownTotal) > (prev.UpTotal+prev.DownTotal)
+}
+
+// dataPlaneOK merges the slow external probe with the fast local one. The
+// local result can only EXCUSE a failed slow probe: bytes moving through the
+// core mean the link works even if the external probe URL answered too slowly.
+// It never overrides a slow probe that succeeded, and a core with no traffic
+// leaves the slow probe's verdict intact. Keeping this one-way is what makes
+// the layering safe - an idle but healthy session is still judged by the
+// external probe, exactly as before.
+func dataPlaneOK(slowOK, localMoving bool) bool {
+	return slowOK || localMoving
+}
+
 // checkDataPlane asks the question status used to assume the answer to: does a
 // real HTTPS request through the local mixed port complete right now? A v6-only
 // session is probed against a v6 literal, because its public sources are v4
@@ -818,6 +845,10 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 	logf(fmt.Sprintf("数据面守护已启动 (port=%d)", opts.mixedPort))
 
 	var fails int
+	// Fast local probe state: the previous /traffic sample lets us tell a
+	// trickle from a stop by comparing cumulative bytes between ticks.
+	var prevTraffic core.TrafficSample
+	haveTraffic := false
 	// psiphonRestarts / psiphonUnderlayFails count consecutive Psiphon-side
 	// repairs for a Psiphon session; both reset the moment the data plane
 	// answers (see psiphon_health.go).
@@ -858,14 +889,27 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 				logf(fmt.Sprintf("系统代理不再指向本端口，已重新指向 127.0.0.1:%d", st.MixedPort))
 			}
 		}
+		// Two-layer data-plane check. The slow probe is the strict signal:
+		// a real request through the proxy. The fast local probe is a one-way
+		// pardon - if the core is still moving bytes, an external timeout is a
+		// slow link, not a dead endpoint, and must not count toward repair.
 		res := checkDataPlane(ctx, st.MixedPort, st.Family)
-		if verdict := judgeHealth(fails, res.OK); !verdict.repair {
+		localMoving := false
+		if sample, serr := core.TrafficSampleNow(st.APIPort); serr == nil {
+			localMoving = localLinkMoving(prevTraffic, sample, haveTraffic)
+			prevTraffic, haveTraffic = sample, true
+		}
+		live := dataPlaneOK(res.OK, localMoving)
+		if verdict := judgeHealth(fails, live); !verdict.repair {
 			fails = verdict.fails
-			if res.OK {
+			if live {
 				psiphonRestarts = 0
 				psiphonUnderlayFails = 0
 				if verdict.recovered {
 					logf("数据面已恢复")
+				}
+				if !res.OK && localMoving {
+					logf("外网探测超时，但核心仍有流量，判定为慢链路（不计入失败）")
 				}
 				continue
 			}
