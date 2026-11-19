@@ -42,6 +42,12 @@ const (
 	stateName   = "state.json"
 	// scanTTL is how long a scan result stays "fresh" before a connect re-scans.
 	scanTTL = 6 * time.Hour
+
+	// staleMaxAge is how far past scanTTL a cached scan may still feed
+	// connect's stale fast path. Within it, "last measured working" endpoints
+	// are worth dialing before paying for a full sweep; beyond it the WARP
+	// endpoint landscape has likely moved on and the scan is the honest path.
+	staleMaxAge = 7 * 24 * time.Hour
 )
 
 // appDir returns the client's working directory (created on demand).
@@ -1540,6 +1546,72 @@ func cachedScanFor(proto string, ipv6 bool) (cachedScan, bool) {
 		return cachedScan{}, false
 	}
 	return cs, true
+}
+
+// staleScanFor returns the stored scan for proto even when past scanTTL, as
+// long as the entry itself is no older than maxAge. It backs connect's stale
+// fast path: an expired cache is still a list of endpoints that measured
+// working when they were stored, and dialing them costs one live verification
+// each versus minutes for a full sweep.
+func staleScanFor(proto string, ipv6 bool, maxAge time.Duration) (cachedScan, bool) {
+	store, err := cache.Open(cache.Options{TTL: scanTTL})
+	if err != nil {
+		return cachedScan{}, false
+	}
+	raw, ok := store.GetStale(scanCacheKey(proto, ipv6), maxAge)
+	if !ok {
+		return cachedScan{}, false
+	}
+	var cs cachedScan
+	if json.Unmarshal(raw, &cs) != nil {
+		return cachedScan{}, false
+	}
+	return cs, true
+}
+
+// staleFastCandidates filters a stale scan into fast-path candidate order:
+// still-working endpoints only, the cached best-first order kept, capped the
+// same way the ordinary path caps its candidates.
+func staleFastCandidates(results []cachedEndpoint, limit int) []cachedEndpoint {
+	out := make([]cachedEndpoint, 0, len(results))
+	for _, ce := range results {
+		if ce.Working && ce.Endpoint != "" {
+			out = append(out, ce)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// refreshStaleCache re-freshens an expired scan cache after a stale fast-path
+// connect succeeded: the verified endpoint leads, endpoints that failed during
+// this connect are marked dead, everything else keeps its cached order and
+// scan-measured numbers (stale ping/speed still order candidates sensibly,
+// and the next real scan replaces them wholesale). One write, on success only
+// — a fast path that failed entirely must leave the cache untouched so the
+// existing rescan-retry path sees the same state it would have without P1.
+func refreshStaleCache(opts options, results []cachedEndpoint, verified cachedEndpoint, failed map[string]bool) {
+	store, err := cache.Open(cache.Options{TTL: scanTTL})
+	if err != nil {
+		return
+	}
+	out := make([]cachedEndpoint, 0, len(results)+1)
+	out = append(out, verified)
+	for _, ce := range results {
+		if ce.Endpoint == verified.Endpoint {
+			continue
+		}
+		if failed[ce.Endpoint] {
+			ce.Working = false
+		}
+		out = append(out, ce)
+	}
+	cs := cachedScan{Proto: scanKeyFor(opts), IPv6: opts.ipv6, At: time.Now(), Results: out}
+	if raw, err := json.Marshal(cs); err == nil {
+		_ = store.Put(scanCacheKey(scanKeyFor(opts), opts.ipv6), raw)
+	}
 }
 
 func betterEndpoint(a, b cachedEndpoint) bool {

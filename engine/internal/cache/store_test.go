@@ -120,3 +120,66 @@ func TestDefaultPathHonoursPortableHome(t *testing.T) {
 		t.Fatalf("DefaultPath = %q, want %q", got, want)
 	}
 }
+
+// GetStale reads an entry past its fresh TTL as long as it is within maxAge,
+// and refuses anything older — the contract the stale fast path relies on.
+func TestStoreGetStale(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WARP_CLIENT_HOME", home)
+	store, err := Open(Options{TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := store.PutTTL("k", []byte("v"), time.Hour); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	// PutTTL normalizes non-positive TTLs to the default, so backdate the
+	// entry on disk instead: past the fresh TTL, within maxAge.
+	backdateCacheFile(t, home, "k", 90*time.Minute) // past the 1h TTL, within a 2h maxAge
+	store2, err := Open(Options{TTL: time.Hour}) // re-read: stale entries only live on disk
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	store = store2
+	if _, ok := store.Get("k"); ok {
+		t.Fatal("expired entry must not read as fresh")
+	}
+	if _, ok := store.GetStale("k", 2*time.Hour); !ok {
+		t.Fatal("expired-but-within-maxAge entry must read via GetStale")
+	}
+	if _, ok := store.GetStale("k", 30*time.Minute); ok {
+		t.Fatal("entry older than maxAge must be refused")
+	}
+	if _, ok := store.GetStale("missing", time.Hour); ok {
+		t.Fatal("missing key must be refused")
+	}
+}
+
+// backdateCacheFile rewinds one entry's StoredAt/ExpiresAt by delta, the way
+// real staleness appears (time passing after a normal Put).
+func backdateCacheFile(t *testing.T, home, key string, delta time.Duration) {
+	t.Helper()
+	p := filepath.Join(home, "cache.json")
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
+	}
+	var entries map[string]Entry
+	if json.Unmarshal(raw, &entries) != nil {
+		t.Fatalf("unmarshal cache: %v", err)
+	}
+	e, ok := entries[key]
+	if !ok {
+		t.Fatalf("key %q missing", key)
+	}
+	e.StoredAt = e.StoredAt.Add(-delta)
+	e.ExpiresAt = e.ExpiresAt.Add(-delta)
+	entries[key] = e
+	out, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(p, out, 0o600); err != nil {
+		t.Fatalf("write cache: %v", err)
+	}
+}

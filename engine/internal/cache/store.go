@@ -118,6 +118,31 @@ func (s *Store) Get(key string) ([]byte, bool) {
 	return e.Payload, true
 }
 
+// GetStale returns the payload for key even when expired, as long as it was
+// stored no longer than maxAge ago. Open() drops expired entries from the
+// in-memory index and Get() refuses them, so the stale fast path needs a raw
+// read: it deliberately re-reads the file. The path is rare (at most once per
+// TTL window per connect) and a successful fast path immediately Put()s the
+// entry fresh again, so the extra read cost is irrelevant.
+func (s *Store) GetStale(key string, maxAge time.Duration) ([]byte, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return nil, false
+	}
+	var entries map[string]Entry
+	if json.Unmarshal(data, &entries) != nil {
+		// Torn or corrupt file: treat as absent, the same way Open does.
+		return nil, false
+	}
+	e, ok := entries[key]
+	if !ok || time.Since(e.StoredAt) > maxAge {
+		return nil, false
+	}
+	return e.Payload, true
+}
+
 // GetTTL returns the payload and how long until it expires, if fresh.
 func (s *Store) GetTTL(key string) ([]byte, time.Duration, bool) {
 	s.mu.RLock()

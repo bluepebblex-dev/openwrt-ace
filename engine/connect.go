@@ -316,18 +316,41 @@ func runConnectInner(ctx context.Context, opts options) error {
 		opts.proto = opts.outerProto
 	}
 
-	// A cold cache means the scan step registers a WARP account and sweeps
-	// the whole endpoint space — minutes, not seconds. Tell the user before
-	// the silence so the click does not look dead.
-	if opts.scanNow {
-		stageMsg(fmt.Sprintf("[%s] 重新扫描端点，约 1-2 分钟，请稍候…", label))
-	} else if _, ok := cachedScanFor(scanKeyFor(opts), opts.ipv6); !ok {
-		stageMsg(fmt.Sprintf("[%s] 首次使用：注册账号并扫描端点，约 1-2 分钟，请稍候…", label))
+	// P1 端点预热（stale fast path）：缓存过期时不阻塞全量扫描，先把「上次
+	// 实测可用」的端点直接送进下面的验证循环——验证本来就是逐个活的，验过
+	// 才算数；全部失活则落回既有的全量扫描重试路径。链式（-through）、
+	// -pick、--scan-now 三条路保持原语义，不进快路径。
+	var results []cachedEndpoint
+	var run protoRun
+	var err error
+	staleUsed := false
+	if !opts.scanNow && opts.through == "" && opts.pick == "" {
+		if _, fresh := cachedScanFor(scanKeyFor(opts), opts.ipv6); !fresh {
+			if cs, ok := staleScanFor(scanKeyFor(opts), opts.ipv6, staleMaxAge); ok {
+				if cands := staleFastCandidates(cs.Results, connectMaxAttempts); len(cands) > 0 {
+					stageMsg(fmt.Sprintf("[%s] 端点缓存已过期（扫描于 %s），先用上次实测可用的 %d 个端点直连，全失败才重新扫描…",
+						label, cs.At.Format("01-02 15:04"), len(cands)))
+					results = cs.Results
+					run = mustParseProto(opts.proto)
+					staleUsed = true
+				}
+			}
+		}
 	}
-	stageMsg(fmt.Sprintf("[%s] 扫描 WARP 端点…", label))
-	results, run, err := runCachedScan(ctx, opts)
-	if err != nil {
-		return fmt.Errorf("scan failed: %w", err)
+	if !staleUsed {
+		// A cold cache means the scan step registers a WARP account and sweeps
+		// the whole endpoint space — minutes, not seconds. Tell the user before
+		// the silence so the click does not look dead.
+		if opts.scanNow {
+			stageMsg(fmt.Sprintf("[%s] 重新扫描端点，约 1-2 分钟，请稍候…", label))
+		} else if _, ok := cachedScanFor(scanKeyFor(opts), opts.ipv6); !ok {
+			stageMsg(fmt.Sprintf("[%s] 首次使用：注册账号并扫描端点，约 1-2 分钟，请稍候…", label))
+		}
+		stageMsg(fmt.Sprintf("[%s] 扫描 WARP 端点…", label))
+		results, run, err = runCachedScan(ctx, opts)
+		if err != nil {
+			return fmt.Errorf("scan failed: %w", err)
+		}
 	}
 
 	// A chained scan dials the outer tunnel in-process; a warm cache does
@@ -466,6 +489,10 @@ func runConnectInner(ctx context.Context, opts options) error {
 	}
 
 	var lastErr error
+	// Endpoints this connect already saw fail (stale fast path only): they are
+	// marked dead when the fast path lands, so the re-freshened cache does not
+	// hand them back as "working" to the next connect.
+	failed := make(map[string]bool)
 	for i, ce := range cands {
 		if i > 0 {
 			stageMsg(fmt.Sprintf("[%s] 端点 %s 隧道不通，换下一个…", label, cands[i-1].Endpoint))
@@ -473,6 +500,9 @@ func runConnectInner(ctx context.Context, opts options) error {
 		stageMsg(fmt.Sprintf("[%s] 连接 %s（第 %d/%d 个）…", label, ce.Endpoint, i+1, len(cands)))
 		state, serr := startAndVerify(ctx, opts, ce, run, bin, cDir, label, nil)
 		if serr == nil {
+			if staleUsed {
+				refreshStaleCache(opts, results, ce, failed)
+			}
 			if err := saveState(state); err != nil {
 				fmt.Fprintln(os.Stderr, errPal.warn("state not persisted: "+err.Error()))
 			}
@@ -517,6 +547,7 @@ func runConnectInner(ctx context.Context, opts options) error {
 			return fmt.Errorf("connect failed: %w", serr)
 		}
 		markEndpointDead(opts, ce)
+		failed[ce.Endpoint] = true
 		stageMsg(fmt.Sprintf("[%s] 端点 %s 已标记为 failed", label, ce.Endpoint))
 	}
 
