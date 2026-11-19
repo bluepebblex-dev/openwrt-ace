@@ -79,6 +79,17 @@ const (
 	// request is a handshake trigger, not a transfer, and a dead combination
 	// must fail fast enough for the next candidate to get a turn.
 	openvpnWarmupReqTimeout = 4 * time.Second
+	// openvpnFastFailLimit is how many sub-second warmup failures condemn a
+	// relay. A 502 that returns instantly is a refused dial through the
+	// outbound (mihomo answers the inbound on the dial's behalf) — while the
+	// handshake is in flight the runLock makes later requests WAIT, never
+	// fail fast, so consecutive instant failures mean the port is refusing
+	// and no retry will ever link. UDP relays fail by timeout instead, so
+	// they keep the full window (conservative).
+	openvpnFastFailLimit = 3
+	// openvpnFastFailCost is the wall-clock ceiling for one request to count
+	// as "instantly refused". Well under the inbound's 5s dial timeout.
+	openvpnFastFailCost = time.Second
 	// openvpnSpeedProbeBytes / openvpnSpeedProbeTimeout are the verification
 	// transfer for an OpenVPN exit. Larger than the generic 128 KiB gate
 	// because the same transfer also feeds the speed ranking: 128 KiB is
@@ -1001,12 +1012,14 @@ func warmupOpenVPN(ctx context.Context, mixedPort int, label string) error {
 	deadline := time.Now().Add(openvpnWarmupWindow)
 	started := time.Now()
 	attempts := 0
+	fastFails := 0
 	var lastErr error
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		attempts++
+		reqStart := time.Now()
 		resp, err := client.Get(target)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -1018,6 +1031,12 @@ func warmupOpenVPN(ctx context.Context, mixedPort int, label string) error {
 			err = fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
 		lastErr = err
+		// P3-lite：亚秒级失败 = 出站拨号被瞬间拒绝（握手进行中时请求会阻塞
+		// 等 runLock，不可能秒回），连续达到阈值说明端口拒绝、重试无意义，
+		// 提前放弃把时间让给下一个中继。
+		if aborted := warmupFastFail(&fastFails, time.Since(reqStart)); aborted {
+			return fmt.Errorf("OpenVPN 中继端口拒绝连接（连续 %d 次秒级失败），提前放弃: %w", fastFails, lastErr)
+		}
 		if attempts%3 == 0 {
 			stageMsg(fmt.Sprintf("[%s] OpenVPN 中继握手中…（%ds）", label, int(time.Since(started).Seconds())))
 		}
@@ -1033,16 +1052,33 @@ func warmupOpenVPN(ctx context.Context, mixedPort int, label string) error {
 	return fmt.Errorf("OpenVPN 中继握手超时（%s 内未建链）: %w", openvpnWarmupWindow, lastErr)
 }
 
-// watchOpenVPNLogs follows mihomo's log stream and reports a terminal relay
-// failure. The warm-up's HTTP requests only see an opaque 502 when the
-// outbound refuses the credentials, so the reason has to come from the core's
-// own log. The stream disappearing (old core, no API) is harmless: warm-up
-// then falls back to its time window.
-func watchOpenVPNLogs(ctx context.Context, apiPort int) (<-chan string, func()) {
+// warmupFastFail folds one warmup failure's cost into the consecutive
+// instant-failure counter and reports whether the relay is condemned. Any
+// slow attempt resets the streak: a slow failure may be a handshake timeout
+// that a retry still survives, only instant refusals are definitive.
+func warmupFastFail(streak *int, cost time.Duration) bool {
+	if cost <= openvpnFastFailCost {
+		*streak++
+		return *streak >= openvpnFastFailLimit
+	}
+	*streak = 0
+	return false
+}
+
+// watchOpenVPNLogs follows mihomo's log stream and reports terminal relay
+// events: credential rejection (AUTH_FAILED — a handshake timeout may still
+// succeed on a retry, an AUTH_FAILED never does), and the outbound's own
+// handshake completion. The success line is a Debugln in mihomo's openvpn
+// outbound ("[OpenVPN](<name>) handshake complete: …"), so the stream must
+// subscribe at debug level; the info-level stream never shows it. The stream
+// disappearing (old core, no API) is harmless: warm-up then falls back to its
+// time window and its HTTP probes.
+func watchOpenVPNLogs(ctx context.Context, apiPort int, name string) (<-chan string, <-chan struct{}, func()) {
 	fatal := make(chan string, 1)
+	linked := make(chan struct{})
 	streamCtx, cancel := context.WithCancel(ctx)
 	go func() {
-		url := "http://127.0.0.1:" + strconv.Itoa(apiPort) + "/logs?level=info"
+		url := "http://127.0.0.1:" + strconv.Itoa(apiPort) + "/logs?level=debug"
 		req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, url, nil)
 		if err != nil {
 			return
@@ -1059,16 +1095,28 @@ func watchOpenVPNLogs(ctx context.Context, apiPort int) (<-chan string, func()) 
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 0, 4096), 1<<20)
 		for sc.Scan() {
-			if reason := vpnAuthFailure(sc.Text()); reason != "" {
+			line := sc.Text()
+			if reason := vpnAuthFailure(line); reason != "" {
 				select {
 				case fatal <- reason:
 				default:
 				}
 				return
 			}
+			if openVPNLinkedLine(name, line) {
+				close(linked)
+				return
+			}
 		}
 	}()
-	return fatal, cancel
+	return fatal, linked, cancel
+}
+
+// openVPNLinkedLine matches mihomo's openvpn outbound handshake-completion
+// debug line for this specific outbound: "[OpenVPN](<name>) handshake complete:".
+func openVPNLinkedLine(name, line string) bool {
+	marker := "[OpenVPN](" + name + ") handshake complete"
+	return strings.Contains(line, marker)
 }
 
 // vpnAuthFailure recognises a definitive OpenVPN credential rejection. This
@@ -1371,7 +1419,7 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 		stageMsg(fmt.Sprintf("[%s] 预热 OpenVPN 中继（握手窗口 %s）…", label, openvpnWarmupWindow))
 		warmCtx, cancelWarm := context.WithCancel(ctx)
 		defer cancelWarm() // 所有返回路径都要释放预热 context（fatal 分支会提前调用）
-		fatalCh, stopWatch := watchOpenVPNLogs(warmCtx, opts.apiPort)
+		fatalCh, linkedCh, stopWatch := watchOpenVPNLogs(warmCtx, opts.apiPort, mihomoOpenVPNName)
 		warmDone := make(chan error, 1)
 		go func() { warmDone <- warmupOpenVPN(warmCtx, opts.mixedPort, label) }()
 		select {
@@ -1388,6 +1436,13 @@ func startAndVerify(ctx context.Context, opts options, ce cachedEndpoint, run pr
 			stopWatch()
 			_ = c.Stop()
 			return clientState{}, fmt.Errorf("OpenVPN 出口认证被拒绝（%s），立即换节点", reason)
+		case <-linkedCh:
+			// The core's own debug line says the relay linked. Cut the warmup
+			// here — often seconds before the next serial HTTP probe would
+			// have noticed — and let verifyTunnel provide the real proof.
+			cancelWarm()
+			stopWatch()
+			stageMsg(fmt.Sprintf("[%s] 中继握手完成（内核日志确认）", label))
 		}
 	}
 

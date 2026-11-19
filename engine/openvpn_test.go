@@ -367,8 +367,13 @@ func TestWatchOpenVPNLogs(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	fatal, stop := watchOpenVPNLogs(ctx, port)
+	fatal, linked, stop := watchOpenVPNLogs(ctx, port, mihomoOpenVPNName)
 	defer stop()
+	select {
+	case <-linked:
+		t.Fatal("handshake-complete must not fire on an auth-failure stream")
+	default:
+	}
 	select {
 	case reason := <-fatal:
 		if reason != "AUTH_FAILED" {
@@ -491,5 +496,71 @@ func TestOpenVPNRender(t *testing.T) {
 	}
 	if err := core.TestConfig(bin, t.TempDir(), out); err != nil {
 		t.Fatalf("mihomo rejects the rendered config: %v\n%s", err, yaml)
+	}
+}
+
+// The debug-level stream must surface the outbound's own handshake-complete
+// line the moment the relay links, and only for this outbound.
+func TestWatchOpenVPNLogsLinked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/logs" || r.URL.Query().Get("level") != "debug" {
+			http.NotFound(w, r)
+			return
+		}
+		fl := w.(http.Flusher)
+		_, _ = io.WriteString(w, `{"type":"debug","payload":"[OpenVPN](OpenVPN Exit) handshake complete: prefixes=[10.8.0.0/24] peer-id=1"}`+"\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	fatal, linked, stop := watchOpenVPNLogs(ctx, port, mihomoOpenVPNName)
+	defer stop()
+	select {
+	case <-linked:
+	case reason := <-fatal:
+		t.Fatalf("unexpected fatal %q", reason)
+	case <-ctx.Done():
+		t.Fatal("handshake-complete line was not surfaced from the debug stream")
+	}
+}
+
+// Sub-second failures are instant refusals: after openvpnFastFailLimit of
+// them in a row the relay is condemned, while any slow attempt resets the
+// streak (a handshake timeout may still succeed on a retry).
+func TestWarmupFastFail(t *testing.T) {
+	var streak int
+	for i := 0; i < openvpnFastFailLimit-1; i++ {
+		if warmupFastFail(&streak, 200*time.Millisecond) {
+			t.Fatalf("fail %d must not abort yet", i+1)
+		}
+	}
+	if !warmupFastFail(&streak, 300*time.Millisecond) {
+		t.Fatal("consecutive instant failures must abort at the limit")
+	}
+	// A slow failure resets the streak: timeouts stay retryable.
+	streak = openvpnFastFailLimit - 1
+	if warmupFastFail(&streak, 4500*time.Millisecond) {
+		t.Fatal("a slow failure must not abort")
+	}
+	if streak != 0 {
+		t.Fatalf("slow failure must reset the streak, got %d", streak)
+	}
+	if warmupFastFail(&streak, 100*time.Millisecond) {
+		t.Fatal("streak must re-accumulate from zero")
+	}
+	if warmupFastFail(&streak, 150*time.Millisecond) {
+		t.Fatal("second instant failure must not abort yet")
+	}
+	if !warmupFastFail(&streak, 120*time.Millisecond) {
+		t.Fatal("third instant failure must abort")
 	}
 }
