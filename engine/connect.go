@@ -515,11 +515,24 @@ func runConnectInner(ctx context.Context, opts options) error {
 	}
 
 	var lastErr error
+	// 连接总预算（2026-11-19 晚高峰事故）：WARP 链路整段不可用时，端点列表
+	// × 每个端点的多轮验证会把 UI 挂成无限转圈，用户等不到任何明确结果。
+	// 到点即停：托管会话直接自我下线（init.d stop，procd 不再 respawn），
+	// 错误写明原因 —— 「失败就老实断开，等人回来手点」与 guard 同一原则。
+	const connectBudget = 6 * time.Minute
+	budgetStart := time.Now()
 	// Endpoints this connect already saw fail (stale fast path only): they are
 	// marked dead when the fast path lands, so the re-freshened cache does not
 	// hand them back as "working" to the next connect.
 	failed := make(map[string]bool)
 	for i, ce := range cands {
+		if elapsed := time.Since(budgetStart); elapsed > connectBudget {
+			lastErr = fmt.Errorf("连接总超时：%.0f 分钟内已试 %d 个端点均未通过验证（链路持续不可用）", elapsed.Minutes(), i)
+			if serviceManaged() {
+				stopRouterService(func(string) {})
+			}
+			return lastErr
+		}
 		if i > 0 {
 			stageMsg(fmt.Sprintf("[%s] 端点 %s 隧道不通，换下一个…", label, cands[i-1].Endpoint))
 		}

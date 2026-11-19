@@ -35,6 +35,17 @@
 	}
 	.ace-core-latest { font-size: 11.5px; color: #d29922; white-space: nowrap; }
 	.ace-core-latest span { opacity: .75; }
+	/* 分流数据两个文件的版本：并排小胶囊，缺哪个哪个变黄，一眼看得出 */
+	.ace-geo-ver { flex: 1 1 100%; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+	.ace-geo-item {
+		font-size: 11.5px; padding: 3px 9px; border-radius: 6px;
+		background: rgba(127,127,127,.10); border: 1px solid rgba(127,127,127,.2);
+		white-space: nowrap;
+	}
+	.ace-geo-item b { font-weight: 600; }
+	.ace-geo-item .v { opacity: .68; }
+	.ace-geo-item.missing { border-color: rgba(210,153,34,.55); color: #d29922; }
+	.ace-geo-item.missing .v { opacity: .9; }
 	.ace-toggle { width: 18px; height: 18px; accent-color: #2f7d4f; }
 	.ace-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 	.ace-msg { font-size: 12.5px; }
@@ -168,11 +179,14 @@
 		<div class="ace-row" id="geoRow">
 			<div class="lbl">分流数据 <span class="ace-core-stat" id="geoStat">检测中…</span></div>
 			<div class="ctl">
-				<button class="btn cbi-button" id="geoBtn" onclick="aceUpdateGeo()">更新</button>
+				<button class="btn cbi-button" id="geoBtn" onclick="aceUpdateGeo()">下载并更新</button>
 			</div>
+			<div class="ace-geo-ver" id="geoVer"></div>
 			<p class="sub">
 				分流（<b>出国流量走隧道、国内流量直连</b>）依赖 <code>geosite.dat</code> 与 <code>geoip.metadb</code>，
-				两者缺一不可。缺失时连接前会自动下载，不用手动操作；点「更新」拉取最新版并重启服务使其生效。
+				两者缺一不可。缺失时连接前会自动下载，不用手动操作；点「下载并更新」拉取最新版并重启服务使其生效。<br>
+				版本口径不同：<code>geoip.metadb</code> 显示数据库的构建日期（读自文件内部）；<code>geosite.dat</code>
+				文件里没有版本字段，显示的是本机下载日期。<br>
 				分流规则由引擎按「绕过大陆」固定生成，不支持自定义规则——这是有意为之的简化。
 			</p>
 		</div>
@@ -447,6 +461,49 @@ function aceInstallCore() {
 /* ---------- 分流数据（geosite.dat / geoip.metadb） ---------- */
 var ACE_SAW_GEO = false;
 
+function aceMb(n) {
+	n = Number(n) || 0;
+	if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+	if (n >= 1024) return Math.round(n / 1024) + ' KB';
+	return n + ' B';
+}
+
+// 两个文件各自的版本。缺哪个就哪个变黄——「到底有没有」不用点开就知道。
+function aceGeoFiles(files) {
+	var box = document.getElementById('geoVer');
+	if (!box) return;
+	box.innerHTML = '';
+	for (var i = 0; i < files.length; i++) {
+		var f = files[i] || {};
+		var el = document.createElement('span');
+		el.className = 'ace-geo-item' + (f.present ? '' : ' missing');
+		var name = document.createElement('b');
+		name.textContent = f.name || '?';
+		el.appendChild(name);
+		var v = document.createElement('span');
+		v.className = 'v';
+		var bits = [];
+		if (!f.present) {
+			bits.push(f.size ? '缺失（残留 ' + aceMb(f.size) + '，不完整）' : '缺失');
+		} else {
+			bits.push(aceMb(f.size));
+			bits.push(f.version ? f.version : '版本未知');
+		}
+		v.textContent = ' ' + bits.join(' · ');
+		el.appendChild(v);
+		if (f.version_note) el.title = f.version_note;
+		box.appendChild(el);
+	}
+}
+
+function aceGeoFail() {
+	var stat = document.getElementById('geoStat');
+	if (!stat) return;
+	stat.className = 'ace-core-stat bad';
+	stat.textContent = '检测失败';
+	stat.title = '状态接口没有返回可解析的结果，刷新页面重试';
+}
+
 function aceGeoRender(d) {
 	var stat = document.getElementById('geoStat');
 	var btn = document.getElementById('geoBtn');
@@ -459,18 +516,18 @@ function aceGeoRender(d) {
 		return true;
 	}
 	btn.disabled = false;
-	btn.textContent = '更新';
+	btn.textContent = '下载并更新';
 	var g = d.geo || {};
 	if (g.ok) {
 		stat.className = 'ace-core-stat ok';
-		stat.textContent = '已就绪' + (g.site_size && g.ip_size
-			? ' ' + mb(g.site_size) + ' + ' + mb(g.ip_size) : '');
+		stat.textContent = '已就绪';
 		stat.title = '/etc/ace/core/geosite.dat + geoip.metadb';
 	} else {
 		stat.className = 'ace-core-stat bad';
-		stat.textContent = '缺失';
-		stat.title = '连接时引擎会自动补下；也可以点「更新」手动拉取';
+		stat.textContent = '未就绪';
+		stat.title = '连接时引擎会自动补下；也可以点「下载并更新」手动拉取';
 	}
+	aceGeoFiles(g.files || []);
 	return false;
 }
 
@@ -479,7 +536,12 @@ function aceGeoPoll(times) {
 	x.open('GET', ACE_STATUS + '?t=' + Date.now(), true);
 	x.onload = function () {
 		var d = null;
-		try { d = JSON.parse(x.responseText); } catch (e) { return; }
+		try { d = JSON.parse(x.responseText); } catch (e) {}
+		if (!d) {
+			// 别把「检测中…」挂死：接口没给出结果就明说
+			aceGeoFail();
+			return;
+		}
 		var busy = aceGeoRender(d);
 		if (busy) {
 			ACE_SAW_GEO = true;
@@ -491,11 +553,12 @@ function aceGeoPoll(times) {
 			setTimeout(function () { aceGeoPoll((times || 0) + 1); }, 2500);
 		}
 	};
+	x.onerror = function () { aceGeoFail(); };
 	x.send();
 }
 
 function aceUpdateGeo() {
-	if (!confirm('重新下载分流数据（geosite.dat + geoip.metadb，约 12 MB）并重启服务使其生效。服务在运行时会短暂断网重连。继续？')) return;
+	if (!confirm('下载最新分流数据（geosite.dat + geoip.metadb，约 13 MB）并重启服务使其生效。服务在运行时会短暂断网重连。继续？')) return;
 	var stat = document.getElementById('geoStat');
 	document.getElementById('geoBtn').disabled = true;
 	stat.className = 'ace-core-stat busy';

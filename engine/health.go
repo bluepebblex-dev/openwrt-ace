@@ -930,7 +930,10 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 				lanFail = "LAN 数据面: " + lerr.Error()
 			}
 			if derr := dnsPlaneProbe(ctx, 8*time.Second); derr != nil {
-				lanFail += " DNS 链路: " + derr.Error()
+				if lanFail != "" {
+					lanFail += "; "
+				}
+				lanFail += "DNS 链路: " + derr.Error()
 			}
 			if lanFail != "" {
 				live = false

@@ -116,9 +116,19 @@ func lanPlaneProbe(ctx context.Context, timeout time.Duration) error {
 }
 
 // dnsPlaneProbe asks the LAN resolver (dnsmasq, whose upstream is our core in
-// dns-leak mode) for an everyday domestic name. This is the whole-house DNS
-// chain end to end: dnsmasq → core resolver → upstream. A dead link here means
-// every LAN device has broken name lookup even though raw IPs still work.
+// dns-leak mode) for a name that must come back through the tunnel. The domain
+// choice is load-bearing:
+//
+// www.gstatic.com is GEOSITE geolocation-!cn, so in bypass mode its answer is
+// produced by the core resolver's tunneled upstream — exactly the chain this
+// watchdog exists to guard. A domestic name would test the ISP's *direct*
+// upstream instead, the one link ace does not own: the first v1.11.0 router
+// run (2026-11-19 21:12) killed perfectly good sessions because
+// lookup www.baidu.com came back NXDOMAIN from an evening-hour ISP hiccup.
+// A dead tunnel fails this lookup too, so the watchdog still sees what it
+// must; a flaky WAN link no longer murders healthy sessions.
+const dnsProbeName = "www.gstatic.com"
+
 func dnsPlaneProbe(ctx context.Context, timeout time.Duration) error {
 	lan := lanIPv4()
 	if lan == "" {
@@ -133,7 +143,7 @@ func dnsPlaneProbe(ctx context.Context, timeout time.Duration) error {
 	}
 	wctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	_, err := r.LookupHost(wctx, "www.baidu.com")
+	_, err := r.LookupHost(wctx, dnsProbeName)
 	return err
 }
 

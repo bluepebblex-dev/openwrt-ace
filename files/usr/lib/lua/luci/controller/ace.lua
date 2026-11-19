@@ -265,20 +265,83 @@ end
 
 -- 分流数据状态：geosite.dat + geoip.metadb 两个都在（≥512KB）才算就绪。
 -- 大小门槛与引擎 geoDataReady 的判据保持一致，避免「界面说就绪、引擎说缺」。
+--
+-- 版本来源两种，不能混为一谈：geoip.metadb 内部有 build_epoch（真实的数据库
+-- 构建日期），geosite.dat 是纯 protobuf 域名列表、文件里没有版本字段，只能
+-- 显示下载日期。哪一种归哪一种由引擎的 version_note 说明，界面照实展示。
 local GEO_MIN = 512 * 1024
-local function geo_state()
-	local function sz(name)
-		local st = fs.stat(CORE_DIR .. "/" .. name)
-		if st and st.type == "reg" and (st.size or 0) >= GEO_MIN then
-			return st.size
+local GEO_INFO_CACHE = "/tmp/ace-geo-info.json"
+local GEO_NAMES = { "geosite.dat", "geoip.metadb" }
+
+-- 用「大小@mtime」当缓存键：文件没变就不必再起进程解析。
+local function geo_files_key()
+	local parts = {}
+	for _, n in ipairs(GEO_NAMES) do
+		local st = fs.stat(CORE_DIR .. "/" .. n)
+		if st then
+			parts[#parts + 1] = tostring(st.size or 0) .. "@" .. tostring(st.mtime or 0)
+		else
+			parts[#parts + 1] = "-"
 		end
-		return nil
 	end
-	local site, ip = sz("geosite.dat"), sz("geoip.metadb")
+	return table.concat(parts, "|")
+end
+
+local function geo_version_info()
+	local key = geo_files_key()
+	local raw = fs.readfile(GEO_INFO_CACHE)
+	if raw then
+		local k, body = raw:match("^(.-)\n(.*)$")
+		if k == key and body then
+			local ok, obj = pcall(function() return require("luci.jsonc").parse(body) end)
+			if ok and type(obj) == "table" and type(obj.files) == "table" then
+				return obj
+			end
+		end
+	end
+	local out = sys.exec("/usr/bin/ace-engine geo -info -dir " .. CORE_DIR .. " 2>/dev/null") or ""
+	local ok, obj = pcall(function() return require("luci.jsonc").parse(out) end)
+	if ok and type(obj) == "table" and type(obj.files) == "table" then
+		fs.writefile(GEO_INFO_CACHE, key .. "\n" .. out)
+		return obj
+	end
+	return nil
+end
+
+local function geo_state()
+	local seen = {}
+	local info = geo_version_info()
+	if info then
+		for _, f in ipairs(info.files) do
+			if type(f) == "table" and f.name then
+				seen[f.name] = f
+			end
+		end
+	end
+
+	local files, ok = {}, true
+	for _, name in ipairs(GEO_NAMES) do
+		local st = fs.stat(CORE_DIR .. "/" .. name)
+		local size = (st and st.type == "reg") and (st.size or 0) or 0
+		local present = size >= GEO_MIN
+		if not present then
+			ok = false
+		end
+		local v = seen[name] or {}
+		files[#files + 1] = {
+			name = name,
+			present = present and true or false,
+			size = size,
+			version = (present and v.version) or "",
+			version_note = v.version_note or "",
+		}
+	end
 	return {
-		ok = (site ~= nil and ip ~= nil),
-		site_size = site,
-		ip_size = ip,
+		ok = ok,
+		files = files,
+		-- 老界面字段，保留兼容
+		site_size = files[1].present and files[1].size or nil,
+		ip_size = files[2].present and files[2].size or nil,
 	}
 end
 

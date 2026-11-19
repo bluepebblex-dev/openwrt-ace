@@ -358,6 +358,7 @@ func runGeoInstall(args []string) int {
 	fs.SetOutput(os.Stderr)
 	dir := fs.String("dir", "", "target directory for the geo databases")
 	force := fs.Bool("force", false, "re-download even when the databases are already present")
+	info := fs.Bool("info", false, "print presence, size and version of each database as JSON, download nothing")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -370,6 +371,25 @@ func runGeoInstall(args []string) int {
 			return 1
 		}
 		target = filepath.Join(home, "core")
+	}
+	if *info {
+		// Read-only by design: LuCI polls this while the service is starting,
+		// so it must never touch the network or the files.
+		files := core.InspectGeoData(target)
+		ok := true
+		for _, f := range files {
+			if !f.Present {
+				ok = false
+			}
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(struct {
+			Dir   string             `json:"dir"`
+			OK    bool               `json:"ok"`
+			Files []core.GeoFileInfo `json:"files"`
+		}{Dir: target, OK: ok, Files: files})
+		return 0
 	}
 	if err := core.DownloadGeoData(context.Background(), target, func(line string) {
 		fmt.Fprintln(os.Stderr, line)
