@@ -34,41 +34,41 @@
 
 	/* 星盘式连接控制台：深色仪表盘 + 刻度环 + 发光圆钮 */
 	.ace-dial {
-		position: relative; width: 100%; max-width: 432px; margin: 18px auto 0; padding: 4px 10px 16px;
-		border-radius: 26px; color: #f2f3f5;
-		background: radial-gradient(900px 460px at 50% -12%, #17181c 0%, #0a0a0c 62%);
-		border: 1px solid rgba(255,255,255,.08);
-		box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 20px 56px rgba(0,0,0,.32);
+		position: relative; width: 100%; max-width: 432px; margin: 18px auto 0; padding: 4px 10px 12px;
+		border-radius: 26px; color: inherit;
+		/* 不铺底板：星盘直接落在 LuCI 页面背景上，刻度环自己撑起视觉 */
+		background: transparent;
+		border: 0;
 	}
-	.ace-hero { position: relative; width: 320px; height: 320px; margin: 4px auto 0; display: grid; place-items: center; }
+	.ace-hero { position: relative; width: 264px; height: 264px; margin: 4px auto 0; display: grid; place-items: center; }
 	.ace-hero canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 	.ace-knob {
-		position: relative; z-index: 2; width: 162px; height: 162px; border-radius: 50%; border: 0; cursor: pointer;
-		display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+		position: relative; z-index: 2; width: 112px; height: 112px; border-radius: 50%; border: 0; cursor: pointer;
+		display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
 		color: #fff; font-family: inherit;
 		transition: transform .16s ease, box-shadow .45s ease, background .5s ease, color .4s ease;
 		background: radial-gradient(circle at 34% 26%, #ffb765 0%, #ff9a3c 46%, #f0801f 100%);
-		box-shadow: 0 16px 46px rgba(255,140,46,.28), 0 0 0 1px rgba(255,255,255,.10) inset;
+		box-shadow: 0 10px 28px rgba(255,140,46,.26), 0 0 0 1px rgba(255,255,255,.10) inset;
 	}
-	.ace-knob:hover { transform: scale(1.02); }
-	.ace-knob:active { transform: scale(.96); }
+	.ace-knob:hover { transform: scale(1.03); }
+	.ace-knob:active { transform: scale(.95); }
 	.ace-knob.on {
 		color: #e9eaee;
 		background: radial-gradient(circle at 34% 26%, #202024 0%, #141417 60%, #101013 100%);
-		box-shadow: 0 0 0 1px rgba(61,220,132,.45) inset, 0 0 42px rgba(61,220,132,.20), 0 12px 40px rgba(0,0,0,.5);
+		box-shadow: 0 0 0 1px rgba(61,220,132,.45) inset, 0 0 26px rgba(61,220,132,.18), 0 8px 24px rgba(0,0,0,.4);
 	}
 	.ace-knob.busy {
 		color: #e9eaee;
 		background: radial-gradient(circle at 34% 26%, #232327 0%, #151518 60%, #101013 100%);
-		box-shadow: 0 0 0 1px rgba(255,152,56,.35) inset, 0 0 36px rgba(255,152,56,.14);
+		box-shadow: 0 0 0 1px rgba(255,152,56,.35) inset, 0 0 22px rgba(255,152,56,.12);
 		cursor: progress;
 	}
-	.ace-knob .pw { font-size: 30px; line-height: 1; display: flex; align-items: center; justify-content: center; }
-	.ace-knob .pw svg { width: 32px; height: 32px; display: block; }
-	.ace-knob .tx { font-size: 14px; font-weight: 600; letter-spacing: 1.2px; }
+	.ace-knob .pw { font-size: 22px; line-height: 1; display: flex; align-items: center; justify-content: center; }
+	.ace-knob .pw svg { width: 22px; height: 22px; display: block; }
+	.ace-knob .tx { font-size: 12.5px; font-weight: 600; letter-spacing: 1px; }
 	.ace-knob .spin {
-		display: inline-block; width: 26px; height: 26px; border-radius: 50%;
-		border: 2.5px solid rgba(255,255,255,.16); border-top-color: #ff9838;
+		display: inline-block; width: 21px; height: 21px; border-radius: 50%;
+		border: 2.2px solid rgba(255,255,255,.16); border-top-color: #ff9838;
 		animation: acespin .85s linear infinite;
 	}
 	@keyframes acespin { to { transform: rotate(360deg); } }
@@ -86,10 +86,10 @@
 	.ace-dialstate .sub .ip svg { opacity: .5; }
 	/* 窄屏（手机打开 LuCI）：星盘整体缩放，别撑破布局 */
 	@media (max-width: 480px) {
-		.ace-hero { width: 268px; height: 268px; }
-		.ace-knob { width: 138px; height: 138px; }
-		.ace-knob .pw svg { width: 26px; height: 26px; }
-		.ace-knob .tx { font-size: 13px; }
+		.ace-hero { width: 220px; height: 220px; }
+		.ace-knob { width: 88px; height: 88px; }
+		.ace-knob .pw svg { width: 20px; height: 20px; }
+		.ace-knob .tx { font-size: 11.5px; }
 		.ace-dialstate .line { font-size: 16px; }
 	}
 
