@@ -320,12 +320,13 @@ start_service() {
 	# 若继承锁 fd 会一直占着,它内部失败时调 stop 就拿不到锁死等 25s。
 	# 本函数的同步部分(disconnect+procd 配置)到此已跑完,锁该还了。
 	# pending 标记保留到隧道真正就绪/连接断开才清——它要覆盖整个 post_up 期间。
-	if [ "$(cfg_get tun)" = "1" ]; then
+	tun_mode="$(cfg_get tun)"
+	if [ "$tun_mode" = "1" ]; then
 		: > "$WATCH_FLAG"
 		rm -f "$ACE_READY"
 	fi
 	drop_lock
-	if [ "$(cfg_get tun)" = "1" ]; then
+	if [ "$tun_mode" = "1" ]; then
 		# 1000>&- 同样必须做:rc.common 在 source procd.sh 时就调 procd_lock,
 		# 在脚本 shell 里打开 fd 1000 持有 /var/lock/procd_ace.lock 的 flock。
 		# post_up 是后台长跑,若继承这个 fd,procd 的锁就永远放不掉——之后所有

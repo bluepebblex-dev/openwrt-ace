@@ -926,10 +926,21 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 		// 整屋照样瘫痪，哪怕大流量还在走。
 		var lanFail string
 		if st.TUN {
-			if lerr := lanPlaneProbe(ctx, 8*time.Second); lerr != nil && !localMoving {
+			// LAN HTTP 探测和 DNS 链路探测互不依赖，却串行各吃 8s——
+			// 链路劣化时一轮 guard 被从 10s 拖到 26s+，故障发现跟着变慢。
+			// 并发跑，判定语义完全不变：HTTP 仍受 localMoving 宽恕、DNS 不宽恕。
+			// channel 带缓冲，ctx 取消（用户断开）时两个 goroutine 都能退出，不泄漏。
+			lanCh := make(chan error, 1)
+			dnsCh := make(chan error, 1)
+			go func() { lanCh <- lanPlaneProbe(ctx, 8*time.Second) }()
+			go func() { dnsCh <- dnsPlaneProbe(ctx, 8*time.Second) }()
+			// 两个探测都响应 ctx，且有 8s 硬上限；带缓冲 channel 保证
+			// 用户断开时 goroutine 写完就退，这里不会永久阻塞。
+			lerr, derr := <-lanCh, <-dnsCh
+			if lerr != nil && !localMoving {
 				lanFail = "LAN 数据面: " + lerr.Error()
 			}
-			if derr := dnsPlaneProbe(ctx, 8*time.Second); derr != nil {
+			if derr != nil {
 				if lanFail != "" {
 					lanFail += "; "
 				}

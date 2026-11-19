@@ -438,6 +438,14 @@ var ringLit = null, ringState = 'off', ringSwing = 0;
 var ringCX = 0, ringCY = 0, ringR = 0;
 var RING_DPR = Math.min(window.devicePixelRatio || 1, 2.5);
 var ringFpsGate = 0;
+/* 刻度方向是常量：原来每帧 68 根 × 4 次 cos/sin，30fps 下每秒白算 8000 多次。
+   初始化时算一次查表；带时间 t 的波形相位不能预计算，只存相位基线。 */
+var RING_ANG = [], RING_COS = [], RING_SIN = [], RING_WAVE = [];
+for (var ri = 0; ri < RING_N; ri++) {
+	var ra = (ri / RING_N) * Math.PI * 2 - Math.PI / 2;
+	RING_ANG.push(ra); RING_COS.push(Math.cos(ra)); RING_SIN.push(Math.sin(ra));
+	RING_WAVE.push((ri / RING_N) * Math.PI * 4);
+}
 var aceExitIp = '', aceUpSince = 0;
 
 function ringRgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
@@ -477,10 +485,10 @@ function ringDraw(ts) {
 	var col = on ? RING_ON : RING_OFF;
 
 	for (var i = 0; i < RING_N; i++) {
-		var ang = (i / RING_N) * Math.PI * 2 - Math.PI / 2;
+		var ang = RING_ANG[i];
 		var goal = 0, d, l;
 		if (on) {
-			var s = Math.sin((i / RING_N) * Math.PI * 4 - t * 0.9);
+			var s = Math.sin(RING_WAVE[i] - t * 0.9);
 			goal = 0.5 + 0.5 * s * s;
 		} else if (ringState === 'connecting') {
 			d = ang - ringSwing;
@@ -495,15 +503,15 @@ function ringDraw(ts) {
 		l = Math.max(0, Math.min(1, ringLit[i]));
 
 		var inn = inner - l * 3;
-		var x1 = ringCX + Math.cos(ang) * inn, y1 = ringCY + Math.sin(ang) * inn;
-		var x2 = ringCX + Math.cos(ang) * outer, y2 = ringCY + Math.sin(ang) * outer;
+		var x1 = ringCX + RING_COS[i] * inn, y1 = ringCY + RING_SIN[i] * inn;
+		var x2 = ringCX + RING_COS[i] * outer, y2 = ringCY + RING_SIN[i] * outer;
 
 		/* 未连接时给一圈极暗底噪，环的轮廓还在，但不抢眼 */
 		if (ringState === 'off') {
 			ringCtx.strokeStyle = 'rgba(255,255,255,.09)';
 			ringCtx.lineWidth = 1.6;
 			ringCtx.beginPath();
-			ringCtx.moveTo(ringCX + Math.cos(ang) * inner, ringCY + Math.sin(ang) * inner);
+			ringCtx.moveTo(ringCX + RING_COS[i] * inner, ringCY + RING_SIN[i] * inner);
 			ringCtx.lineTo(x2, y2);
 			ringCtx.stroke();
 		}
@@ -791,6 +799,9 @@ function aceRender(d) {
 }
 
 function acePoll() {
+	/* 页面切到后台就别再 2.5s 一次空转后端：星盘动画早已做了 hidden 停帧，
+	   轮询也跟上。visibilitychange 时补一次，切回来不会停在旧状态。 */
+	if (document.hidden) return;
 	var x = new XMLHttpRequest();
 	x.open('GET', ACE_STATUS + '?t=' + Date.now(), true);
 	x.onload = function () {
@@ -800,6 +811,7 @@ function acePoll() {
 }
 
 function aceLoadLog() {
+	if (document.hidden) return;
 	var x = new XMLHttpRequest();
 	x.open('GET', ACE_LOG + '?t=' + Date.now(), true);
 	x.onload = function () {
@@ -1012,6 +1024,9 @@ acePoll();
 aceLoadLog();
 setInterval(acePoll, 2500);
 setInterval(aceLoadLog, 8000);
+document.addEventListener('visibilitychange', function () {
+	if (!document.hidden) { acePoll(); aceLoadLog(); }
+});
 </script>
 
 <%+footer%>

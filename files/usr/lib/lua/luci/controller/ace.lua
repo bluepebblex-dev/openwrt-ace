@@ -350,8 +350,10 @@ function api_status()
 	local st = read_state() or {}
 	local running = st.connected and pid_alive(st.core_pid)
 	local tun_up = fs.access("/sys/class/net/ace0") ~= nil
-	-- ubus 调用本身永远成功，得看返回体里有没有这个服务才算数
-	local svc = (sys.exec("ubus call service list 2>/dev/null") or ""):find('"ace"', 1, true) ~= nil
+	-- ubus 调用本身永远成功，得看返回体里有没有这个服务才算数。
+	-- 按 name 过滤：全量列表约 8.9KB，过滤后 366B，2.5s 轮询一次没必要拉全量；
+	-- 真机验证过过滤结果里仍有 "ace" 这个 key，判定语义不变。
+	local svc = (sys.exec("ubus call service list '{\"name\":\"ace\"}' 2>/dev/null") or ""):find('"ace"', 1, true) ~= nil
 
 	-- start/stop 在 init.d 里同步跑(含 dnsmasq/防火墙),期间写 /var/run/ace.pending
 	-- (内容 up 或 down)告诉界面「正在朝某方向走」。这里读它,并顺手清掉已经落到
@@ -398,7 +400,12 @@ function api_status()
 	-- 流量速率/累计：mihomo 控制接口只听 127.0.0.1 且无 secret，由本进程
 	-- （root）代查。速率由前端用两次轮询的总量差算，后端不做有状态缓存。
 	local aport = cursor():get("ace", "main", "api_port") or "9090"
-	local conn = sys.exec("wget -q -T 2 -O- http://127.0.0.1:" .. aport .. "/connections 2>/dev/null")
+	-- 未连接时 mihomo 没在跑，这个请求只会白等 2s 超时，前端也不展示流量；
+	-- 连接态翻转后的第一帧 running 就已为真，不会漏掉刚开始的累计量。
+	local conn
+	if running then
+		conn = sys.exec("wget -q -T 2 -O- http://127.0.0.1:" .. aport .. "/connections 2>/dev/null")
+	end
 	if conn and conn ~= "" then
 		local ok, cj = pcall(function()
 			return require("luci.jsonc").parse(conn)
