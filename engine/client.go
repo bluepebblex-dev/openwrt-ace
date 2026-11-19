@@ -1161,6 +1161,14 @@ const probeTimeout = 5 * time.Second
 // second of "connected" over a browser that loads nothing.
 const probeBudget = 9 * time.Second
 
+// dnsProbeTimeout bounds the DNS recheck in the connect gate. The recheck is a
+// report (the HTTPS probe already proves name resolution inside the tunnel),
+// and its target - dns.google - sits unreachable on some exits, so an over-
+// generous timeout here is dead weight on every single connect: measured on a
+// CN exit, the check burned its full 5s window on every connect before this
+// was cut to 3s and moved beside the throughput download.
+const dnsProbeTimeout = 3 * time.Second
+
 // fetchExitProbe queries the live tunnel's exit metadata (IP, colo, country)
 // through the local mixed port, so status reflects the running connection.
 //
@@ -1171,13 +1179,19 @@ const probeBudget = 9 * time.Second
 // browser that cannot load a page. Returning without an error means at least
 // one source answered 2xx through the tunnel.
 func fetchExitProbe(ctx context.Context, mixedPort int) (clientState, error) {
+	return fetchExitProbeWith(ctx, &http.Transport{
+		Proxy: http.ProxyURL(mustParseURL("http://127.0.0.1:" + strconv.Itoa(mixedPort))),
+	})
+}
+
+// fetchExitProbeWith is fetchExitProbe over a caller-supplied transport, so a
+// verifyTunnel gate can share one connection pool across its probe and its
+// throughput download.
+func fetchExitProbeWith(ctx context.Context, tr *http.Transport) (clientState, error) {
 	var out clientState
-	proxyURL := "http://127.0.0.1:" + strconv.Itoa(mixedPort)
 	client := &http.Client{
-		Timeout: probeTimeout,
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(mustParseURL(proxyURL)),
-		},
+		Timeout:   probeTimeout,
+		Transport: tr,
 	}
 	var (
 		lastErr  error
@@ -1273,17 +1287,17 @@ func traceField(body, key string) string {
 	return ""
 }
 
-// probeDNSTunnel proves the DNS path through the proxy, which the round-trip
+// probeDNSTunnelWith proves the DNS path through the proxy, which the round-trip
 // above only proves implicitly: every source there is a hostname, so a failed
 // lookup surfaces as the same generic error a dead tunnel gives. Resolving
 // explicitly separates the two, because DNS failing while TCP still connects
 // has a different fix (the resolver list) from the tunnel being torn down.
-func probeDNSTunnel(ctx context.Context, mixedPort int) error {
+// timeout is passed in rather than fixed: the recheck is a report, and the
+// caller decides how long a report may delay the connect.
+func probeDNSTunnelWith(ctx context.Context, tr *http.Transport, timeout time.Duration) error {
 	client := &http.Client{
-		Timeout: probeTimeout,
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(mustParseURL("http://127.0.0.1:" + strconv.Itoa(mixedPort))),
-		},
+		Timeout:   timeout,
+		Transport: tr,
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://dns.google/resolve?name=cloudflare.com&type=A", nil)
 	if err != nil {
@@ -1369,8 +1383,16 @@ func verifyTunnel(ctx context.Context, opts options, logf func(string)) (clientS
 	if family == famV6 {
 		return verifyTunnelV6Only(ctx, opts, logf)
 	}
+	// One shared transport for every probe in this gate: the HTTPS probe opens
+	// the tunnel's first connection to speed.cloudflare.com, and the throughput
+	// download reuses it instead of paying a second TLS-via-tunnel handshake.
+	// Transport is safe for concurrent use, which the DNS recheck below relies
+	// on too.
+	tr := &http.Transport{
+		Proxy: http.ProxyURL(mustParseURL("http://127.0.0.1:" + strconv.Itoa(opts.mixedPort))),
+	}
 	logf("数据面验证：HTTPS 经隧道访问…")
-	probe, perr := fetchExitProbe(ctx, opts.mixedPort)
+	probe, perr := fetchExitProbeWith(ctx, tr)
 	if perr != nil && ctx.Err() == nil {
 		// The first probe races the WG handshake (whose trigger packet is
 		// dropped), so one retry absorbs a healthy-but-slow endpoint.
@@ -1378,7 +1400,7 @@ func verifyTunnel(ctx context.Context, opts options, logf func(string)) (clientS
 			return probe, ctx.Err()
 		}
 		logf("首次探测未通过，重试…")
-		probe, perr = fetchExitProbe(ctx, opts.mixedPort)
+		probe, perr = fetchExitProbeWith(ctx, tr)
 	}
 	if err := ctx.Err(); err != nil {
 		return probe, err
@@ -1388,7 +1410,7 @@ func verifyTunnel(ctx context.Context, opts options, logf func(string)) (clientS
 		// completed request already implies the resolver worked; an explicit
 		// lookup here only separates "DNS is dead" from "the tunnel is dark",
 		// which need different fixes and used to look identical in the log.
-		if derr := probeDNSTunnel(ctx, opts.mixedPort); derr != nil {
+		if derr := probeDNSTunnelWith(ctx, tr, dnsProbeTimeout); derr != nil {
 			return probe, fmt.Errorf("HTTPS 请求超时/失败（且隧道内 DNS 不可用）: %w (DNS: %v)", perr, derr)
 		}
 		return probe, fmt.Errorf("HTTPS 请求超时/失败（隧道内 DNS 正常）: %w", perr)
@@ -1408,7 +1430,14 @@ func verifyTunnel(ctx context.Context, opts options, logf func(string)) (clientS
 		payloadBytes, payloadTimeout = openvpnSpeedProbeBytes, openvpnSpeedProbeTimeout
 	}
 	logf("数据面验证：吞吐（下载载荷）…")
-	bps, terr := probeThroughput(ctx, opts.mixedPort, payloadBytes, payloadTimeout)
+	// The DNS recheck is a report, not a gate — and from CN-exit tunnels its
+	// target (dns.google) can sit on its full timeout on every single connect.
+	// Run it beside the throughput download instead of after it: the connect
+	// no longer pays its latency serially, and its verdict still lands in the
+	// log before "连接成功" prints.
+	dnsCh := make(chan error, 1)
+	go func() { dnsCh <- probeDNSTunnelWith(ctx, tr, dnsProbeTimeout) }()
+	bps, terr := probeThroughputWith(ctx, tr, payloadBytes, payloadTimeout)
 	if terr != nil {
 		// A timed-out transfer on an OpenVPN exit is usually a slow relay, not
 		// a dead one: VPN Gate throttles, and the payload is 512 KiB. As long
@@ -1429,8 +1458,9 @@ func verifyTunnel(ctx context.Context, opts options, logf func(string)) (clientS
 	// DNS, as its own line: the round-trip above proves it implicitly (every
 	// source is a hostname resolved inside the tunnel), so this is a report,
 	// not a gate - a third-party lookup service being unreachable must not
-	// fail a tunnel that just carried traffic.
-	if derr := probeDNSTunnel(ctx, opts.mixedPort); derr == nil {
+	// fail a tunnel that just carried traffic. Started beside the throughput
+	// download above; wait for its verdict here (bounded by dnsProbeTimeout).
+	if derr := <-dnsCh; derr == nil {
 		logf("DNS 数据面验证成功")
 	} else {
 		logf("提示：DNS 复核服务不可用（" + derr.Error() + "）")
@@ -1477,13 +1507,17 @@ func verifyTunnelV6Only(ctx context.Context, opts options, logf func(string)) (c
 		return clientState{}, cerr
 	}
 	if err != nil {
-		if derr := probeDNSTunnel(ctx, opts.mixedPort); derr != nil {
+		if derr := probeDNSTunnelWith(ctx, &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL("http://127.0.0.1:" + strconv.Itoa(opts.mixedPort))),
+		}, dnsProbeTimeout); derr != nil {
 			return clientState{}, fmt.Errorf("IPv6 请求超时/失败（且隧道内 DNS 不可用）: %w (DNS: %v)", err, derr)
 		}
 		return clientState{}, fmt.Errorf("IPv6 请求超时/失败（隧道内 DNS 正常）: %w", err)
 	}
 	logf("IPv6 数据面验证成功，出口 " + v6)
-	if derr := probeDNSTunnel(ctx, opts.mixedPort); derr == nil {
+	if derr := probeDNSTunnelWith(ctx, &http.Transport{
+		Proxy: http.ProxyURL(mustParseURL("http://127.0.0.1:" + strconv.Itoa(opts.mixedPort))),
+	}, dnsProbeTimeout); derr == nil {
 		logf("DNS 数据面验证成功")
 	} else {
 		logf("提示：DNS 复核服务不可用（" + derr.Error() + "）")
@@ -1506,10 +1540,14 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 }
 
 // verifyPayloadBytes / verifyPayloadTimeout are the throughput floor the connect
-// gate enforces: 128 KiB within 12s ≈ 11 KiB/s. Deliberately low — a slow but
+// gate enforces: 64 KiB within 12s ≈ 5.5 KiB/s. Deliberately low — a slow but
 // usable tunnel must pass, while a stalled one (which delivers ~0) must not.
+// 64 KiB (down from 128) still forces a real multi-second transfer through the
+// congestion window, but halves what a slow exit pays for the same guarantee:
+// measured on a CN exit at ~24 KB/s, the old payload made every connect wait
+// ~5s for the download alone.
 const (
-	verifyPayloadBytes   = 128 * 1024
+	verifyPayloadBytes   = 64 * 1024
 	verifyPayloadTimeout = 12 * time.Second
 )
 
@@ -1556,12 +1594,13 @@ func measureDownBps(mixedPort, bytes int, timeout time.Duration) int64 {
 // connect time rather than surfacing as "connected, but pages never load". The
 // returned bits per second cover the body transfer only (TLS setup and the
 // request are already done), which is what the speed floor compares.
-func probeThroughput(ctx context.Context, mixedPort, want int, timeout time.Duration) (int64, error) {
+// probeThroughputWith downloads a fixed payload through the proxy and returns
+// the observed byte rate. It takes the gate's shared transport so the download
+// reuses the connection the HTTPS probe already opened through the tunnel.
+func probeThroughputWith(ctx context.Context, tr *http.Transport, want int, timeout time.Duration) (int64, error) {
 	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(mustParseURL("http://127.0.0.1:" + strconv.Itoa(mixedPort))),
-		},
+		Timeout:   timeout,
+		Transport: tr,
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", want), nil)
