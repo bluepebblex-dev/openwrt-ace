@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -473,7 +474,14 @@ func doScan(ctx context.Context, opts options) ([]cachedEndpoint, protoRun, erro
 		ph = applyFilters(ph, opts)
 	}
 
-	return projectCacheEndpoints(ph), run, nil
+	// P2 带宽择优：扫描本身只量 loss/ping，对队首几个候选各拉一小段数据
+	// 计时，把实测吞吐更高的端点提到队首——connect 仍按候选串行逐个验证，
+	// 只是选择更贴近真实体验。预算封顶，量不完的部分保持延迟序。
+	ordered := refineScanOrder(ctx, opts, &ph)
+	if ordered == nil {
+		return projectCacheEndpoints(ph), run, nil
+	}
+	return projectOrderedEndpoints(ordered), run, nil
 }
 
 // projectCacheEndpoints projects a finished scan into the cacheable records
@@ -481,7 +489,12 @@ func doScan(ctx context.Context, opts options) ([]cachedEndpoint, protoRun, erro
 // Shared by the connect pipeline's internal scan and the standalone scan
 // command so both write identical entries.
 func projectCacheEndpoints(ph phaseResult) []cachedEndpoint {
-	working := workingSorted(ph.results)
+	return projectOrderedEndpoints(workingSorted(ph.results))
+}
+
+// projectOrderedEndpoints projects an already-ordered working list verbatim:
+// the caller owns the order (ping-sorted, or P2's throughput-refined one).
+func projectOrderedEndpoints(working []endpointResult) []cachedEndpoint {
 	out := make([]cachedEndpoint, 0, len(working))
 	for _, r := range working {
 		out = append(out, cachedEndpoint{
@@ -499,6 +512,95 @@ func projectCacheEndpoints(ph phaseResult) []cachedEndpoint {
 		})
 	}
 	return out
+}
+
+// connectSpeedTop is how many ping-sorted head candidates get a light
+// throughput measurement before a connect's scan orders them.
+const connectSpeedTop = 5
+
+// connectSpeedBudget caps the whole refinement so a pathologically slow
+// stretch cannot double the scan's wall time.
+const connectSpeedBudget = 45 * time.Second
+
+// connectSpeedMinHeadroom skips the refinement entirely when the caller's own
+// deadline is close (the LuCI nodes bridge scans under a 180s budget): better
+// a ping-ordered cache entry than a half-measured one racing the deadline.
+const connectSpeedMinHeadroom = 60 * time.Second
+
+// refineScanOrder is the P2 bandwidth picker: scan ranks by loss/ping, but the
+// experience tracks throughput, so the head candidates each pull a small
+// sample through the tunnel and measured-fast endpoints move to the front.
+// Only positively measured endpoints are reordered — a failed measurement
+// never demotes anyone, the rest keep their ping order. Returns nil when
+// nothing was measured (caller falls back to the plain ping order).
+func refineScanOrder(ctx context.Context, opts options, ph *phaseResult) []endpointResult {
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < connectSpeedMinHeadroom {
+		return nil
+	}
+	working := workingSorted(ph.results)
+	if len(working) == 0 {
+		return nil
+	}
+	head := working
+	if len(head) > connectSpeedTop {
+		head = head[:connectSpeedTop]
+	}
+	budget, cancel := context.WithTimeout(ctx, connectSpeedBudget)
+	defer cancel()
+	tn, err := newTunnel(ph.run)
+	if err != nil {
+		stageMsg(fmt.Sprintf("[%s] 测速跳过：测速隧道建立失败（%v），保持延迟序", protoLabel(opts.proto), err))
+		return nil
+	}
+	defer closeAfterDrain(tn)
+	stageMsg(fmt.Sprintf("[%s] 测速队首 %d 个候选（预算 %s），按实测吞吐重排…",
+		protoLabel(opts.proto), len(head), connectSpeedBudget))
+	timeout := time.Duration(opts.timeoutSec) * time.Second
+	speeds := make(map[string]float64, len(head))
+	for _, r := range head {
+		if budget.Err() != nil {
+			break
+		}
+		speeds[r.endpoint] = endpointSpeed(budget, tn, r.endpoint, timeout)
+	}
+	// Write the measurements back into the results FIRST — the ordered list
+	// below is rebuilt from them, so the projected cache records and the
+	// completion message actually carry the measured Mbps.
+	for i := range ph.results {
+		if s, ok := speeds[ph.results[i].endpoint]; ok {
+			ph.results[i].speed = s
+		}
+	}
+	ordered, ok := orderFastFirst(workingSorted(ph.results), speeds)
+	if !ok {
+		stageMsg(fmt.Sprintf("[%s] 测速完成但无有效样本（%d 个候选全部失败），保持延迟序", protoLabel(opts.proto), len(head)))
+		return nil
+	}
+	if best := ordered[0]; best.speed > 0 {
+		stageMsg(fmt.Sprintf("[%s] 测速完成：%s %.1f Mbps 居首", protoLabel(opts.proto), best.endpoint, best.speed))
+	}
+	return ordered
+}
+
+// orderFastFirst splits the ping-ordered working list into positively measured
+// (sorted by throughput, fastest first) and the rest (original order kept).
+func orderFastFirst(working []endpointResult, speeds map[string]float64) ([]endpointResult, bool) {
+	fast := make([]endpointResult, 0, len(speeds))
+	rest := make([]endpointResult, 0, len(working))
+	for _, r := range working {
+		if s, ok := speeds[r.endpoint]; ok && s > 0 {
+			fast = append(fast, r)
+		} else {
+			rest = append(rest, r)
+		}
+	}
+	if len(fast) == 0 {
+		return nil, false
+	}
+	sort.SliceStable(fast, func(i, j int) bool {
+		return speeds[fast[i].endpoint] > speeds[fast[j].endpoint]
+	})
+	return append(fast, rest...), true
 }
 
 // ---------------------------------------------------------------------------

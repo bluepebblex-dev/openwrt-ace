@@ -55,5 +55,8 @@ esac
 
 {
 	echo "=== $(date '+%F %T') ace $* ==="
+	# 引擎的 connect 各阶段提示只走 stderr（connect.go 的 stageMsg），且仅在
+	# ACE_PROGRESS 非空时输出；路由器排障全靠这份日志，必须打开。
+	export ACE_PROGRESS=1
 	exec /usr/bin/ace-engine "$@" 2>&1
 } >>"$LOG"
