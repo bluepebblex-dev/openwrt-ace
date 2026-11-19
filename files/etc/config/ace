@@ -2,6 +2,10 @@ config ace 'main'
 	# 是否随系统启动（由 LuCI 的开关写入，init.d 用 rc.common 的 enabled 状态）
 	option enabled '0'
 
+	# 插件版本号，由引擎包 postinst 每次安装/升级自动刷新（唯一来源是引擎二进制的 version），
+	# 供首页图标下方展示。这里只是占位默认值。
+	option version 'dev'
+
 	# 底层协议：awg（AmneziaWG）/ wg（WireGuard）/ masque
 	option proto 'awg'
 

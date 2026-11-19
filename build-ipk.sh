@@ -191,6 +191,11 @@ if uci -q show ace.main >/dev/null 2>&1; then
 	done
 	uci -q commit ace
 fi
+# 版本号以引擎二进制为唯一事实来源，每次安装/升级刷新到 uci，首页图标下方显示。
+# 这里读 /usr/bin/ace-engine（opkg 先铺数据文件再跑 postinst，它已在盘上），
+# 不硬编码 VER，避免脚本里的 VER 与打进二进制的 main.version 不同步。
+ACE_VER=$(/usr/bin/ace-engine version 2>/dev/null)
+[ -n "$ACE_VER" ] && uci -q set "ace.main.version=$ACE_VER" && uci -q commit ace
 # 升级前服务在跑就把它拉回来：之前 prerm stop 之后 postinst 只装文件不重启，
 # opkg upgrade 一轮下来 ACE 静默停在「已停止」，用户还以为一切正常。
 # 注意必须同步 start——后台 ( sleep 1; start ) & 会被 opkg 的脚本会话回收
