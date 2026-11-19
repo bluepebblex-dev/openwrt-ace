@@ -46,6 +46,8 @@
 	.ace-geo-item .v { opacity: .68; }
 	.ace-geo-item.missing { border-color: rgba(210,153,34,.55); color: #d29922; }
 	.ace-geo-item.missing .v { opacity: .9; }
+	/* 下载中：蓝色描边 + 实时字节，下载完成后原样落回正常胶囊 */
+	.ace-geo-item.downloading { border-color: rgba(88,166,255,.55); color: #58a6ff; }
 	.ace-toggle { width: 18px; height: 18px; accent-color: #2f7d4f; }
 	.ace-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 	.ace-msg { font-size: 12.5px; }
@@ -469,21 +471,26 @@ function aceMb(n) {
 }
 
 // 两个文件各自的版本。缺哪个就哪个变黄——「到底有没有」不用点开就知道。
-function aceGeoFiles(files) {
+// dl 是下载进度表（文件名 → 已下载字节）：正在下的那个显示蓝色「下载中」，
+// 其余照常——下载期间旧文件还在服务，版本不会消失。
+function aceGeoFiles(files, dl) {
 	var box = document.getElementById('geoVer');
 	if (!box) return;
 	box.innerHTML = '';
 	for (var i = 0; i < files.length; i++) {
 		var f = files[i] || {};
+		var getting = dl && (dl[f.name] || 0) > 0;
 		var el = document.createElement('span');
-		el.className = 'ace-geo-item' + (f.present ? '' : ' missing');
+		el.className = 'ace-geo-item' + (getting ? ' downloading' : (f.present ? '' : ' missing'));
 		var name = document.createElement('b');
 		name.textContent = f.name || '?';
 		el.appendChild(name);
 		var v = document.createElement('span');
 		v.className = 'v';
 		var bits = [];
-		if (!f.present) {
+		if (getting) {
+			bits.push('下载中 ' + aceMb(dl[f.name]));
+		} else if (!f.present) {
 			bits.push(f.size ? '缺失（残留 ' + aceMb(f.size) + '，不完整）' : '缺失');
 		} else {
 			bits.push(aceMb(f.size));
@@ -507,9 +514,14 @@ function aceGeoFail() {
 function aceGeoRender(d) {
 	var stat = document.getElementById('geoStat');
 	var btn = document.getElementById('geoBtn');
+	var g = d.geo || {};
 	if (d.geo_installing) {
 		stat.className = 'ace-core-stat busy';
-		stat.textContent = '正在下载数据…';
+		var total = 0, dl = g.downloading || {};
+		for (var k in dl) total += dl[k];
+		// 版本胶囊下载期间照常渲染：旧文件还在服务，正在下的标成蓝色下载中
+		aceGeoFiles(g.files || [], dl);
+		stat.textContent = '正在下载数据…' + (total > 0 ? '（已下 ' + aceMb(total) + '）' : '');
 		stat.title = d.geo_log || '';
 		btn.disabled = true;
 		btn.textContent = '下载中';
@@ -517,7 +529,6 @@ function aceGeoRender(d) {
 	}
 	btn.disabled = false;
 	btn.textContent = '下载并更新';
-	var g = d.geo || {};
 	if (g.ok) {
 		stat.className = 'ace-core-stat ok';
 		stat.textContent = '已就绪';
@@ -549,8 +560,12 @@ function aceGeoPoll(times) {
 			ACE_SAW_GEO = false;
 			aceMsg('分流数据已更新，服务正在重连', 'ok');
 		}
-		if (busy && (times || 0) < 120) {
+		// 镜像要轮着试，慢源一个文件就能拖好几分钟：轮询窗口放到 20 分钟。
+		// 超限不代表失败——后台进程还在跑，页面明说去哪看结果，不搞假转圈。
+		if (busy && (times || 0) < 480) {
 			setTimeout(function () { aceGeoPoll((times || 0) + 1); }, 2500);
+		} else if (busy) {
+			aceMsg('下载仍在后台进行，完成后刷新本页即可看到新版本', 'ok');
 		}
 	};
 	x.onerror = function () { aceGeoFail(); };

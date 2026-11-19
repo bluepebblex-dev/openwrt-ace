@@ -422,6 +422,19 @@ function api_status()
 	out.geo_installing = fs.access(GEO_FLAG) and true or false
 	if out.geo_installing then
 		out.geo_log = (sys.exec("tail -n 1 " .. GEO_LOG .. " 2>/dev/null") or ""):gsub("%s+$", "")
+		-- 引擎走 .part → rename，下载完成前旧文件原封不动，版本照常可显示；
+		-- .part 的大小就是已下载字节。镜像 403 换源时 part 会删除重建，
+		-- 界面上数字回落属正常，不是丢了进度。
+		local prog = {}
+		for _, name in ipairs(GEO_NAMES) do
+			local st = fs.stat(CORE_DIR .. "/" .. name .. ".part")
+			if st and st.type == "reg" and (st.size or 0) > 0 then
+				prog[name] = st.size
+			end
+		end
+		if next(prog) ~= nil then
+			out.geo.downloading = prog
+		end
 	end
 
 	-- 会话时长由前端算不划算：这里直接给秒数
