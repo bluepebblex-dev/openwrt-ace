@@ -160,6 +160,31 @@
 	.ace-hint.ok { background: rgba(46,125,82,.10); border-color: rgba(46,125,82,.35); }
 	.ace-hint.slow { background: rgba(216,90,48,.10); border-color: rgba(216,90,48,.4); }
 
+	/* 出国连通性：一键测有没有「显示已连接但其实出不去」 */
+	.ace-probe {
+		margin-top: 12px; background: linear-gradient(180deg, #121216 0%, #0d0d10 100%);
+		border: 1px solid rgba(255,255,255,.08); border-radius: 20px; padding: 14px 18px 12px; color: #cfd3da;
+		box-shadow: 0 14px 40px rgba(0,0,0,.22);
+	}
+	.ace-probe-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+	.ace-probe-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: #e8eaee; }
+	.ace-probe-title .sub { font-size: 11px; font-weight: 400; color: #8b8f98; }
+	.ace-probe-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(152px, 1fr)); gap: 8px; margin-top: 12px; }
+	.ace-probe-item {
+		display: flex; align-items: center; gap: 8px; min-width: 0; padding: 9px 11px;
+		background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.06); border-radius: 10px;
+	}
+	.ace-probe-item .st { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #5a5f68; }
+	.ace-probe-item.ok .st { background: #3ddc84; box-shadow: 0 0 9px rgba(61,220,132,.55); }
+	.ace-probe-item.bad .st { background: #f2687e; box-shadow: 0 0 9px rgba(242,104,126,.45); }
+	.ace-probe-item .nm { font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; }
+	.ace-probe-item .dt { margin-left: auto; font-size: 11px; color: #8b8f98; font-variant-numeric: tabular-nums; }
+	.ace-probe-foot { margin-top: 10px; font-size: 11.5px; line-height: 1.55; color: #7b8089; }
+	.ace-probe-foot .verdict { font-weight: 600; }
+	.ace-probe-foot .verdict.ok { color: #3ddc84; }
+	.ace-probe-foot .verdict.bad { color: #f2687e; }
+	.ace-probe-foot .verdict.warn { color: #ff9838; }
+
 	/* 流量走势（渐变面积图，见 .ace-flow-chart） */
 
 	/* 诊断结果 */
@@ -263,6 +288,20 @@
 		</div>
 	</div>
 
+	<div class="ace-probe">
+		<div class="ace-probe-head">
+			<div class="ace-probe-title">🚀 出国连通性 <span class="sub">「已连接」不等于真能出国，点一下验证</span></div>
+			<button class="btn cbi-button" id="probeBtn" onclick="aceProbe()">一键测</button>
+		</div>
+		<div class="ace-probe-grid" id="probeGrid">
+			<div class="ace-probe-item"><span class="st"></span><span class="nm">YouTube</span><span class="dt">未测</span></div>
+			<div class="ace-probe-item"><span class="st"></span><span class="nm">Google</span><span class="dt">未测</span></div>
+			<div class="ace-probe-item"><span class="st"></span><span class="nm">GitHub</span><span class="dt">未测</span></div>
+			<div class="ace-probe-item"><span class="st"></span><span class="nm">国内对照</span><span class="dt">未测</span></div>
+		</div>
+		<div class="ace-probe-foot" id="probeFoot">四个站发真实请求，10 秒内返回。国外站应通、国内对照应直连；测的是路由器出口，代表整屋。</div>
+	</div>
+
 	<div class="ace-link" id="linkCard">
 		<div class="badge">⛓</div>
 		<div style="min-width:0;flex:1">
@@ -325,6 +364,7 @@ var ACE_ACTION = '<%=url("admin/services/ace/api/action")%>';
 var ACE_LOG = '<%=url("admin/services/ace/api/log")%>';
 var ACE_SAVE = '<%=url("admin/services/ace/api/save")%>';
 var ACE_DIAG = '<%=url("admin/services/ace/api/diagnose")%>';
+var ACE_PROBE = '<%=url("admin/services/ace/api/probe")%>';
 var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var aceBusy = false;
 var aceLast = null;   /* 上一次 status（流量速率用总量差算） */
@@ -816,9 +856,85 @@ function aceDiagnose() {
 	x.send();
 }
 
+/* 一键测：连接状态是引擎自己报的，这里发真实 HTTP 请求验证「是不是真能出国」。
+   测的是路由器出口（LAN 客户端和它走同一条 TUN），四站并发，后端 10 秒封顶。 */
+function aceProbeReset() {
+	var grid = document.getElementById('probeGrid');
+	var foot = document.getElementById('probeFoot');
+	if (!grid || !foot) return;
+	grid.innerHTML = '<div class="ace-probe-item"><span class="st"></span><span class="nm">YouTube</span><span class="dt">未测</span></div>'
+		+ '<div class="ace-probe-item"><span class="st"></span><span class="nm">Google</span><span class="dt">未测</span></div>'
+		+ '<div class="ace-probe-item"><span class="st"></span><span class="nm">GitHub</span><span class="dt">未测</span></div>'
+		+ '<div class="ace-probe-item"><span class="st"></span><span class="nm">国内对照</span><span class="dt">未测</span></div>';
+	foot.textContent = '连接状态变化后结果已失效，点「一键测」重新验证。';
+}
+
+function aceProbeDone(msg, cls) {
+	var btn = document.getElementById('probeBtn');
+	btn.disabled = false;
+	btn.textContent = '一键测';
+	document.getElementById('probeFoot').innerHTML = '<span class="verdict ' + cls + '">' + msg + '</span>';
+}
+
+function aceProbe() {
+	var btn = document.getElementById('probeBtn');
+	var grid = document.getElementById('probeGrid');
+	btn.disabled = true;
+	btn.textContent = '测试中…';
+	grid.innerHTML = '<div class="ace-probe-item"><span class="st"></span><span class="nm">四个站并发请求中…</span><span class="dt">≤10s</span></div>';
+	document.getElementById('probeFoot').textContent = '正在从路由器出口真实请求四个站点，请稍候…';
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_PROBE + '?t=' + Date.now(), true);
+	x.timeout = 25000;
+	x.onload = function () {
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) {}
+		if (!d || !d.rows) {
+			aceProbeDone('探测接口无响应，看下面的运行日志。', 'bad');
+			return;
+		}
+		var html = '', cnOk = false, i, r;
+		for (i = 0; i < d.rows.length; i++) {
+			r = d.rows[i];
+			if (r.key === 'baidu') cnOk = !!r.ok;
+			var dt = r.code > 0 ? (r.code + ' · ' + (r.ms / 1000).toFixed(2) + 's') : '超时/不可达';
+			html += '<div class="ace-probe-item ' + (r.ok ? 'ok' : 'bad') + '">'
+				+ '<span class="st"></span><span class="nm">' + r.label + '</span>'
+				+ '<span class="dt">' + dt + '</span></div>';
+		}
+		grid.innerHTML = html;
+
+		var cls, txt;
+		if (!d.connected) {
+			if (d.foreign_ok === 0) {
+				cls = 'warn'; txt = '当前未连接，国外站不通属预期 —— 这就是直连态。';
+			} else {
+				cls = 'bad'; txt = '未连接但国外站通了 ' + d.foreign_ok + '/3，检查是不是别的代理在接管。';
+			}
+		} else if (d.foreign_ok === 3) {
+			cls = cnOk ? 'ok' : 'warn';
+			txt = cnOk ? '出国正常 · 3/3 国外站可达，国内对照走直连。'
+				: '出国正常 · 3/3 可达，但国内对照不通，分流可能过宽。';
+		} else if (d.foreign_ok > 0) {
+			cls = 'warn'; txt = '只通 ' + d.foreign_ok + '/3 —— 隧道活着但出口质量差，重连或换协议试试。';
+		} else {
+			cls = 'bad'; txt = '国外站全不可达 —— 「已连接」是假象，实际没出国。';
+		}
+		var at = d.at ? new Date(d.at * 1000).toTimeString().slice(0, 8) : '';
+		btn.disabled = false;
+		btn.textContent = '一键测';
+		document.getElementById('probeFoot').innerHTML = '<span class="verdict ' + cls + '">' + txt + '</span>'
+			+ (d.exit_ip ? ' · 出口 ' + d.exit_ip : '') + (at ? ' · 测于 ' + at : '');
+	};
+	x.ontimeout = function () { aceProbeDone('探测超时（25 秒），看下面的运行日志。', 'bad'); };
+	x.onerror = function () { aceProbeDone('探测请求失败。', 'bad'); };
+	x.send();
+}
+
 function aceToggle() {
 	/* 断开直接执行，不再弹确认：状态卡和日志已经足够反馈，多一次点击反而碍事。 */
 	aceBusy = true;
+	aceProbeReset();
 	acePoll();
 
 	var body = 'action=' + (document.getElementById('knob')._connected ? 'stop' : 'start')

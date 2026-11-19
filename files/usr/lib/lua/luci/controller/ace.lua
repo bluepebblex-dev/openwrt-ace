@@ -29,6 +29,7 @@ function index()
 	entry({"admin", "services", "ace", "settings"}, template("ace/settings"), _("设置"), 10)
 	entry({"admin", "services", "ace", "api", "status"}, call("api_status")).leaf = true
 	entry({"admin", "services", "ace", "api", "diagnose"}, call("api_diagnose")).leaf = true
+	entry({"admin", "services", "ace", "api", "probe"}, call("api_probe")).leaf = true
 	entry({"admin", "services", "ace", "api", "action"}, call("api_action")).leaf = true
 	entry({"admin", "services", "ace", "api", "log"}, call("api_log")).leaf = true
 	entry({"admin", "services", "ace", "api", "settings"}, call("api_settings")).leaf = true
@@ -520,6 +521,51 @@ function api_diagnose()
 
 	http.prepare_content("application/json")
 	http.write_json({ rows = rows, at = os.time() })
+end
+
+-- 一键测「是不是真能出国」。和 api_diagnose 一样是只读体检：
+-- 只发 HTTP 请求、读状态文件，不碰 TUN / 路由 / DNS / 连接。
+-- 三个国外站 + 一个国内对照；国内对照必须通而国外站不通，就是没接管成功。
+-- 探测从路由器发出，和 LAN 客户端走同一条 TUN 数据面，所以能代表整屋。
+-- 四个 curl 并发跑：串行的话晚高峰单个站 10s 超时，四次要等 40s。
+local PROBE_TARGETS = {
+	{ key = "youtube", label = "YouTube", url = "https://www.youtube.com/generate_204" },
+	{ key = "google",   label = "Google",  url = "https://www.google.com/generate_204" },
+	{ key = "github",   label = "GitHub",  url = "https://github.com/robots.txt" },
+	{ key = "baidu",    label = "国内对照", url = "https://www.baidu.com" },
+}
+local PROBE_TIMEOUT = 10
+
+function api_probe()
+	local cmds, files = {}, {}
+	for _, t in ipairs(PROBE_TARGETS) do
+		local f = "/tmp/ace-probe-" .. t.key
+		files[#files + 1] = f
+		cmds[#cmds + 1] = "curl -s -m " .. PROBE_TIMEOUT .. " -o /dev/null"
+			.. " -w '%{http_code} %{time_total}' '" .. t.url .. "' > '" .. f .. "' 2>/dev/null &"
+	end
+	sys.exec("rm -f " .. table.concat(files, " ") .. "; " .. table.concat(cmds, " ") .. " wait")
+
+	local rows, foreign_ok = {}, 0
+	for _, t in ipairs(PROBE_TARGETS) do
+		local raw = fs.readfile("/tmp/ace-probe-" .. t.key) or ""
+		local code_s, sec_s = raw:match("^(%d+)%s+([%d%.]+)")
+		local code = tonumber(code_s) or 0
+		local ms = sec_s and math.floor(tonumber(sec_s) * 1000 + 0.5) or 0
+		local ok = code >= 200 and code < 400
+		if t.key ~= "baidu" and ok then foreign_ok = foreign_ok + 1 end
+		rows[#rows + 1] = {
+			key = t.key, label = t.label, ok = ok,
+			code = code, ms = ms, url = t.url,
+		}
+	end
+	local st = read_state() or {}
+	http.prepare_content("application/json")
+	http.write_json({
+		rows = rows, foreign_ok = foreign_ok, foreign_total = 3,
+		connected = st.connected and true or false,
+		exit_ip = st.exit_ip or "", at = os.time(),
+	})
 end
 
 function api_action()
