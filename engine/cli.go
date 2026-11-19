@@ -262,6 +262,11 @@ func main() {
 		// since nobody types it by hand.
 		os.Exit(runCoreInstall(os.Args[2:]))
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "geo" {
+		// Internal: provision the geo routing databases. LuCI's "下载分流数据"
+		// button shells out to this; hidden like `core`.
+		os.Exit(runGeoInstall(os.Args[2:]))
+	}
 	switch os.Args[1] {
 	case "-h", "-help", "--help", "help":
 		rootUsage(os.Stdout)
@@ -341,6 +346,42 @@ func runCoreInstall(args []string) int {
 		return 1
 	}
 	fmt.Println(bin)
+	return 0
+}
+
+// runGeoInstall provisions the geo routing databases (geosite.dat +
+// geoip.metadb) into -dir. It reuses core.DownloadGeoData: official source
+// first, then the mirrors, each candidate accepted only above the size floor.
+// -force is the manual "update" path: drop the existing files and fetch fresh.
+func runGeoInstall(args []string) int {
+	fs := flag.NewFlagSet("geo", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	dir := fs.String("dir", "", "target directory for the geo databases")
+	force := fs.Bool("force", false, "re-download even when the databases are already present")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	target := *dir
+	if target == "" {
+		home, err := appDir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errPal.fail(err.Error()))
+			return 1
+		}
+		target = filepath.Join(home, "core")
+	}
+	if err := core.DownloadGeoData(context.Background(), target, func(line string) {
+		fmt.Fprintln(os.Stderr, line)
+	}, *force); err != nil {
+		fmt.Fprintln(os.Stderr, errPal.fail(err.Error()))
+		return 1
+	}
+	if !core.GeoDataReady(target) {
+		fmt.Fprintln(os.Stderr, errPal.fail("geo: 下载结束但数据仍不完整"))
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "geo: 分流数据就绪")
 	return 0
 }
 

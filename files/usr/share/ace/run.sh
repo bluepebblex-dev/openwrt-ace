@@ -11,6 +11,13 @@ proto=$(uci -q get ace.main.proto); proto=${proto:-awg}
 mport=$(uci -q get ace.main.mixed_port); mport=${mport:-7890}
 aport=$(uci -q get ace.main.api_port); aport=${aport:-9090}
 core=$(uci -q get ace.main.core); core=${core:-/usr/bin/mihomo}
+# 下载版内核优先：/etc/ace/core/mihomo（设置页下载，带 SHA256 校验）一旦存在
+# 就生效，除非用户明确填了非默认路径。系统自带 mihomo 往往偏旧（1.19.12，
+# 2025-07 构建），TUN/auto-route 行为缺陷在 2026-11-19 真机上浪费了整晚——
+# 设置页承诺「下载版自动优先生效」，run.sh 得兑现这句话。
+if [ "$core" = "/usr/bin/mihomo" ] && [ -x /etc/ace/core/mihomo ]; then
+	core=/etc/ace/core/mihomo
+fi
 ovpn=$(uci -q get ace.main.openvpn)
 region=$(uci -q get ace.main.openvpn_region)
 ipv6=$(uci -q get ace.main.ipv6)
@@ -23,6 +30,13 @@ tun=$(uci -q get ace.main.tun)
 # 解析器查询跟随规则走隧道：不开的话内核从 WAN 直查明文上游，被墙域名
 # 一律拿到污染结果（youtube/google → Facebook IP），流量走隧道也白搭。
 dns_leak=$(uci -q get ace.main.dns_leak)
+# 分流模式：bypass = 出国走隧道、国内直连（默认）。非法值一律回落 bypass，
+# 不让 uci 被手工改坏后把任意字符串喂给引擎的规则渲染器。
+split=$(uci -q get ace.main.split); split=${split:-bypass}
+case "$split" in
+	bypass|global|direct|blacklist|custom) ;;
+	*) split=bypass ;;
+esac
 
 LOG=/var/log/ace.log
 # 日志在 tmpfs 上，但长跑几天也会撑大；超过 1MB 就重开
@@ -32,7 +46,8 @@ LOG=/var/log/ace.log
 # 不带它的话 connect 打完状态行就退出，procd 每隔几秒重生一次，每次都把
 # 上一个内核杀掉重建隧道（日志里会看到一串 killed stale core + connected）。
 set -- connect -hold -proto "$proto" \
-	-mixed-port "$mport" -api-port "$aport" -no-proxy
+	-mixed-port "$mport" -api-port "$aport" -no-proxy \
+	-proxy-mode "$split"
 
 # 内核路径只在真的可执行时才传。传一个失效路径是硬错误——引擎会直接退出，
 # 不会回落到自己下载；省略 -core 时引擎按「$WARP_CLIENT_HOME/core → 下载」

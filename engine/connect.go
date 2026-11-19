@@ -257,6 +257,21 @@ func runConnectInner(ctx context.Context, opts options) error {
 	chainUserProto = userProto
 	label := protoLabel(userProto)
 	stageMsg(fmt.Sprintf("[%s] 开始连接…", label))
+
+	// 绕过大陆分流需要 geo 数据（geosite.dat + geoip.metadb）。没有就先下载：
+	// 失败不阻断连接——渲染器发现数据缺失会跳过分流规则退化为全代理，这里把
+	// 原因写进日志，而不是让用户对着「连上了但没分流」猜。下载挂在连接的
+	// ctx 上：用户取消连接，下载也跟着停。
+	if opts.proxyMode == modeBypass && !geoDataReady() {
+		if dir, err := coreDir(); err == nil {
+			stageMsg(fmt.Sprintf("[%s] 下载分流数据（geosite/geoip，首次约 12 MB）…", label))
+			if err := core.DownloadGeoData(ctx, dir, func(line string) { stageMsg(line) }, false); err != nil {
+				stageMsg(fmt.Sprintf("[%s] 分流数据下载失败，本次连接不分流（全代理）：%v", label, err))
+			} else {
+				stageMsg(fmt.Sprintf("[%s] 分流数据就绪", label))
+			}
+		}
+	}
 	// The user is waiting on this connect and needs one endpoint, so stop the
 	// scan once a few are verified (the ranking still has room to pick a good
 	// one). A plain `scan` leaves this at 0 and measures everything.
@@ -1711,6 +1726,42 @@ func adoptTun(ctx context.Context, opts options, ce cachedEndpoint, run protoRun
 			_ = c.Stop()
 			teardownTunDevice()
 			return nil, fmt.Errorf("接管后数据面不通: %w", perr)
+		}
+	}
+	// LAN 保底（2026-11-19 第三次断网事故）。本机代理端口通了不代表接管层
+	// 通了：auto-route 已经吸走默认路由，防火墙 zone 落地前 fw4 会丢掉所有
+	// LAN→TUN 的转发。init.d post_up 加完 zone 会留就绪标记，等它出现后再
+	// 探测一次真实数据面（不带源绑定的本机流量会被 auto-route 规则捕获进
+	// TUN，等效于验证整条出国链路）——不过关就立刻回滚，绝不带着坏接管
+	// 进入 connected。注意探测绝不能绑定源地址：绑定源的包不匹配 auto-route
+	// 规则，从 WAN 明文出去访问被墙端点，必然超时（v1.10.1 真机教训）。
+	if serviceManaged() && tunDeviceName() != "" {
+		stageMsg(fmt.Sprintf("[%s] 等待接管层就绪（防火墙/DNS）…", label))
+		if !waitRouterReadyFlag(ctx, 90*time.Second) {
+			_ = c.Stop()
+			teardownTunDevice()
+			return nil, fmt.Errorf("接管层未就绪：init.d 未确认防火墙 zone 与 DNS（90 秒）")
+		}
+		stageMsg(fmt.Sprintf("[%s] 验证局域网数据面…", label))
+		var lanErr, dnsErr error
+		for i := 0; i < 4; i++ {
+			lanErr = lanPlaneProbe(ctx, 12*time.Second)
+			dnsErr = dnsPlaneProbe(ctx, 8*time.Second)
+			if lanErr == nil && dnsErr == nil {
+				break
+			}
+			// fw zone / dnsmasq 刚落地，conntrack 清表后首包可能慢，给几轮机会
+			if !sleepCtx(ctx, 5*time.Second) {
+				break
+			}
+		}
+		if lanErr != nil || dnsErr != nil {
+			_ = c.Stop()
+			teardownTunDevice()
+			if lanErr != nil {
+				return nil, fmt.Errorf("局域网数据面验证失败（保底回滚）: %w", lanErr)
+			}
+			return nil, fmt.Errorf("全屋 DNS 链路验证失败（保底回滚）: %w", dnsErr)
 		}
 	}
 	return c, nil

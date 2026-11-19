@@ -165,6 +165,17 @@
 				<code>/etc/ace/core/mihomo</code>，约 20 MB；下载版一旦存在就自动优先生效，不必改上面的路径。
 			</p>
 		</div>
+		<div class="ace-row" id="geoRow">
+			<div class="lbl">分流数据 <span class="ace-core-stat" id="geoStat">检测中…</span></div>
+			<div class="ctl">
+				<button class="btn cbi-button" id="geoBtn" onclick="aceUpdateGeo()">更新</button>
+			</div>
+			<p class="sub">
+				分流（<b>出国流量走隧道、国内流量直连</b>）依赖 <code>geosite.dat</code> 与 <code>geoip.metadb</code>，
+				两者缺一不可。缺失时连接前会自动下载，不用手动操作；点「更新」拉取最新版并重启服务使其生效。
+				分流规则由引擎按「绕过大陆」固定生成，不支持自定义规则——这是有意为之的简化。
+			</p>
+		</div>
 	</div>
 
 	<div class="ace-bar">
@@ -185,6 +196,7 @@ var ACE_GET = '<%=url("admin/services/ace/api/settings")%>';
 var ACE_SAVE = '<%=url("admin/services/ace/api/save")%>';
 var ACE_STATUS = '<%=url("admin/services/ace/api/status")%>';
 var ACE_CORE = '<%=url("admin/services/ace/api/core")%>';
+var ACE_GEO = '<%=url("admin/services/ace/api/geo")%>';
 var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var ACE_FLAGS = ['tun', 'openvpn', 'ipv6', 'dns_takeover', 'dns_leak', 'lan_watchdog', 'enabled'];
 var ACE_SAW_INSTALL = false; /* 本次页面里见过下载标记，用于结束时提示「已更新」 */
@@ -432,10 +444,87 @@ function aceInstallCore() {
 	x.send('action=install&token=' + encodeURIComponent(ACE_TOKEN));
 }
 
+/* ---------- 分流数据（geosite.dat / geoip.metadb） ---------- */
+var ACE_SAW_GEO = false;
+
+function aceGeoRender(d) {
+	var stat = document.getElementById('geoStat');
+	var btn = document.getElementById('geoBtn');
+	if (d.geo_installing) {
+		stat.className = 'ace-core-stat busy';
+		stat.textContent = '正在下载数据…';
+		stat.title = d.geo_log || '';
+		btn.disabled = true;
+		btn.textContent = '下载中';
+		return true;
+	}
+	btn.disabled = false;
+	btn.textContent = '更新';
+	var g = d.geo || {};
+	if (g.ok) {
+		stat.className = 'ace-core-stat ok';
+		stat.textContent = '已就绪' + (g.site_size && g.ip_size
+			? ' ' + mb(g.site_size) + ' + ' + mb(g.ip_size) : '');
+		stat.title = '/etc/ace/core/geosite.dat + geoip.metadb';
+	} else {
+		stat.className = 'ace-core-stat bad';
+		stat.textContent = '缺失';
+		stat.title = '连接时引擎会自动补下；也可以点「更新」手动拉取';
+	}
+	return false;
+}
+
+function aceGeoPoll(times) {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_STATUS + '?t=' + Date.now(), true);
+	x.onload = function () {
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) { return; }
+		var busy = aceGeoRender(d);
+		if (busy) {
+			ACE_SAW_GEO = true;
+		} else if (ACE_SAW_GEO) {
+			ACE_SAW_GEO = false;
+			aceMsg('分流数据已更新，服务正在重连', 'ok');
+		}
+		if (busy && (times || 0) < 120) {
+			setTimeout(function () { aceGeoPoll((times || 0) + 1); }, 2500);
+		}
+	};
+	x.send();
+}
+
+function aceUpdateGeo() {
+	if (!confirm('重新下载分流数据（geosite.dat + geoip.metadb，约 12 MB）并重启服务使其生效。服务在运行时会短暂断网重连。继续？')) return;
+	var stat = document.getElementById('geoStat');
+	document.getElementById('geoBtn').disabled = true;
+	stat.className = 'ace-core-stat busy';
+	stat.textContent = '正在启动…';
+	var x = new XMLHttpRequest();
+	x.open('POST', ACE_GEO, true);
+	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+	x.onload = function () {
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) {}
+		if (x.status !== 200 || !d || !d.ok) {
+			aceMsg('启动下载失败（HTTP ' + x.status + '）', 'err');
+			document.getElementById('geoBtn').disabled = false;
+			return;
+		}
+		aceGeoPoll(0);
+	};
+	x.onerror = function () {
+		aceMsg('启动下载失败（网络错误）', 'err');
+		document.getElementById('geoBtn').disabled = false;
+	};
+	x.send('action=update&token=' + encodeURIComponent(ACE_TOKEN));
+}
+
 document.getElementById('f-openvpn').addEventListener('change', aceOvpnHint);
 
 aceLoad();
 aceCorePoll(0);
+aceGeoPoll(0);
 </script>
 
 <%+footer%>

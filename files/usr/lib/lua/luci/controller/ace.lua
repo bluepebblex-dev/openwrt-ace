@@ -34,6 +34,7 @@ function index()
 	entry({"admin", "services", "ace", "api", "settings"}, call("api_settings")).leaf = true
 	entry({"admin", "services", "ace", "api", "save"}, call("api_save")).leaf = true
 	entry({"admin", "services", "ace", "api", "core"}, call("api_core")).leaf = true
+	entry({"admin", "services", "ace", "api", "geo"}, call("api_geo")).leaf = true
 end
 
 -- ---------------------------------------------------------------- CSRF
@@ -141,6 +142,10 @@ end
 local CORE_DIR = "/etc/ace/core"
 local CORE_FLAG = "/var/run/ace-core-installing"
 local CORE_LOG = "/var/log/ace-core.log"
+-- 分流数据（geosite.dat / geoip.metadb）：bypass 分流的前提，缺了引擎连接前
+-- 会自动补下；这里只负责把现状报给界面、接「手动更新」按钮。
+local GEO_FLAG = "/var/run/ace-geo-installing"
+local GEO_LOG = "/var/log/ace-geo.log"
 -- probe 结果按 (path, size, mtime) 缓存：一次 probe 要跑八次 mihomo -t（约 3 秒），
 -- 而 api_status 每 2.5 秒被轮询一次，不缓存等于把 CPU 钉在配置解析上。
 local PROBE_CACHE = "/var/run/ace-probe.json"
@@ -258,6 +263,25 @@ local function core_state()
 	return st
 end
 
+-- 分流数据状态：geosite.dat + geoip.metadb 两个都在（≥512KB）才算就绪。
+-- 大小门槛与引擎 geoDataReady 的判据保持一致，避免「界面说就绪、引擎说缺」。
+local GEO_MIN = 512 * 1024
+local function geo_state()
+	local function sz(name)
+		local st = fs.stat(CORE_DIR .. "/" .. name)
+		if st and st.type == "reg" and (st.size or 0) >= GEO_MIN then
+			return st.size
+		end
+		return nil
+	end
+	local site, ip = sz("geosite.dat"), sz("geoip.metadb")
+	return {
+		ok = (site ~= nil and ip ~= nil),
+		site_size = site,
+		ip_size = ip,
+	}
+end
+
 function api_status()
 	local st = read_state() or {}
 	local running = st.connected and pid_alive(st.core_pid)
@@ -328,6 +352,13 @@ function api_status()
 	-- 失败原因（下载不通、校验不过）直接给一行，别让人对着转圈猜
 	if out.core_installing or not out.core.ok then
 		out.core_log = (sys.exec("tail -n 1 " .. CORE_LOG .. " 2>/dev/null") or ""):gsub("%s+$", "")
+	end
+
+	-- 分流数据状态与下载进度
+	out.geo = geo_state()
+	out.geo_installing = fs.access(GEO_FLAG) and true or false
+	if out.geo_installing then
+		out.geo_log = (sys.exec("tail -n 1 " .. GEO_LOG .. " 2>/dev/null") or ""):gsub("%s+$", "")
 	end
 
 	-- 会话时长由前端算不划算：这里直接给秒数
@@ -633,6 +664,44 @@ function api_core()
 	sys.call(": > " .. CORE_LOG .. "; ( WARP_CLIENT_HOME=/etc/ace /usr/bin/ace-engine core -dir " ..
 		CORE_DIR .. " -force >>" .. CORE_LOG .. " 2>&1" .. restart ..
 		"; rm -f " .. CORE_FLAG .. " ) >/dev/null 2>&1 &")
+
+	http.prepare_content("application/json")
+	http.write_json({ ok = true, installing = true })
+end
+
+-- ---------------------------------------------------------------- 分流数据
+-- geosite.dat / geoip.metadb 各约 6-11 MB，官方源 + 镜像，后台下载，界面轮询
+-- api_status 的 geo_installing。-force = 手动更新：删旧文件重下最新版。
+-- 下载成功且服务在跑时重启，让新数据真正生效——规则是连接时渲染进
+-- config.yaml 的，光换文件不重启不会生效。
+function api_geo()
+	if not csrf_ok() then
+		return csrf_deny()
+	end
+
+	if (http.formvalue("action") or "") ~= "update" then
+		http.status(400, "Bad Request")
+		http.prepare_content("application/json")
+		http.write_json({ ok = false, error = "unknown action" })
+		return
+	end
+
+	if fs.access(GEO_FLAG) then
+		http.prepare_content("application/json")
+		http.write_json({ ok = true, installing = true })
+		return
+	end
+
+	local st = read_state() or {}
+	local was_running = st.connected and pid_alive(st.core_pid)
+	local restart = was_running
+		and (" && /etc/init.d/ace restart >>" .. GEO_LOG .. " 2>&1")
+		or ""
+
+	fs.writefile(GEO_FLAG, "1\n")
+	sys.call(": > " .. GEO_LOG .. "; ( WARP_CLIENT_HOME=/etc/ace /usr/bin/ace-engine geo -dir " ..
+		CORE_DIR .. " -force >>" .. GEO_LOG .. " 2>&1" .. restart ..
+		"; rm -f " .. GEO_FLAG .. " ) >/dev/null 2>&1 &")
 
 	http.prepare_content("application/json")
 	http.write_json({ ok = true, installing = true })

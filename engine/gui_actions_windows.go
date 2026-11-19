@@ -185,7 +185,7 @@ func (u *natUI) startGeoDownload() {
 	go func() {
 		derr := core.DownloadGeoData(u.ctx, dir, func(line string) {
 			u.sync(func() { u.addLog(line, false) })
-		})
+		}, false)
 		u.sync(func() {
 			u.m.geoBusy = false
 			if derr != nil {

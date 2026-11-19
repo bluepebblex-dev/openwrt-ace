@@ -284,8 +284,9 @@ var (
 		{"", "psiphon", "", "Psiphon exit (V1): bring the base protocol up first, then exit through a local Psiphon sidecar (the final IP becomes Psiphon's)"},
 		{"", "psiphon-exe", "PATH", "path to the Psiphon executable (else PSIPHON_EXE env or <coreDir>/psiphon.exe)"},
 		{"", "openvpn", "", "OpenVPN exit (V2): chain a VPN Gate relay behind the base protocol (IPv4 only; wins over --psiphon)"},
-		{"", "openvpn-region", "ISO", "preferred VPN Gate exit country (ISO alpha-2, empty = fastest reachable node)"},
-		{"", "top", "N", "reserved: number of top endpoints to keep in the cache"},
+	{"", "openvpn-region", "ISO", "preferred VPN Gate exit country (ISO alpha-2, empty = fastest reachable node)"},
+	{"", "proxy-mode", "MODE", "routing preset: bypass (CN traffic direct, the rest through the tunnel), global, direct or custom (legacy proxy-all); empty = custom. The router service always passes one — the split is a product decision, not a knob"},
+	{"", "top", "N", "reserved: number of top endpoints to keep in the cache"},
 	}}
 
 	findJunkI1Group = flagGroup{"AmneziaWG init packet", []flagSpec{
@@ -496,6 +497,10 @@ func setupConnectFlags(fs *flag.FlagSet, o *options) {
 	fs.StringVar(&o.psiphonExe, "psiphon-exe", "", "")
 	fs.BoolVar(&o.openvpnMode, "openvpn", false, "")
 	fs.StringVar(&o.openvpnRegion, "openvpn-region", "", "")
+	// 分流模式：路由器服务由 run.sh 显式传入（默认 bypass）。空值沿用旧语义
+	// （custom：全部走出口，只有局域网段直连）——这是本仓库 v1.9.4 之前
+	// 无 settings.json 平台一直跑的行为，不能悄悄改掉 GUI 的既有安装。
+	fs.StringVar(&o.proxyMode, "proxy-mode", "", "")
 	o.wantMeta = true
 }
 
@@ -561,6 +566,7 @@ func applyCommonFlags(fs *flag.FlagSet, o *options) {
 	applyDNS(o)
 	applyTarget(o)
 	applyNode(o)
+	validateProxyMode(o)
 	rejectMasqueFilters(*o)
 	validateMasqueAttempts()
 	validateThrough(fs, *o)
@@ -653,6 +659,20 @@ func applyNode(o *options) {
 	o.countries = splitList(o.country, "-country")
 	o.dropColos = splitList(o.excludeNode, "-exclude-node")
 	o.dropCountries = splitList(o.excludeCountry, "-exclude-country")
+}
+
+// validateProxyMode bounds -proxy-mode to the presets the renderer knows. An
+// unknown value would otherwise fall through routeRules as "custom with no
+// rules" — proxy everything — which reads like a working bypass session until
+// someone checks where the traffic actually went.
+func validateProxyMode(o *options) {
+	switch o.proxyMode {
+	case "", modeBypass, modeBlacklist, modeGlobal, modeDirect, modeCustom:
+	default:
+		fmt.Fprintf(os.Stderr, "-proxy-mode %q must be one of %s|%s|%s|%s|%s\n",
+			o.proxyMode, modeBypass, modeBlacklist, modeGlobal, modeDirect, modeCustom)
+		os.Exit(2)
+	}
 }
 
 func splitList(value, flagName string) []string {

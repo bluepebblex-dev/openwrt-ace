@@ -12,17 +12,25 @@ import (
 
 // The "bypass mainland" preset emits GEOSITE,cn and GEOIP,CN rules, and mihomo
 // refuses to start a config that references geodata it does not have. The
-// databases are ~13 MB, so they are not embedded in the binary: the release
-// ZIP carries them, and an install that lacks them fetches them here.
+// databases are ~13 MB, so they are not embedded in the binary: they are
+// fetched here, on demand.
 //
 // meta-rules-dat publishes both files under a moving "latest" tag, which is
-// what mihomo's own auto-update uses. The checksums are not verified — the
-// download is only accepted when the file parses as a database of plausible
-// size, which is enough to catch a truncated or HTML-error-page response.
+// what mihomo's own auto-update uses. There is no published checksum, so the
+// mirrors follow the same integrity model as an unpinned core release: try the
+// official github.com URL first, then the mirror hosts — these are *data*
+// files, not executables, and the acceptance floor below (plus mihomo's own
+// strict parse at config load, which fails the whole config on a corrupt
+// database) is what catches a truncated or HTML-error-page response. A bad
+// database cannot run code; worst case it fails safe as a connect error.
 const (
 	geoDataRepo   = "MetaCubeX/meta-rules-dat"
 	geoDataTagURL = "https://github.com/" + geoDataRepo + "/releases/download/latest/"
 )
+
+// geoMirrors are the same hosts the pinned core download uses, tried in order
+// after the official source.
+var geoMirrors = []string{"https://ghfast.top/", "https://ghproxy.net/"}
 
 // geoAssets are the files mihomo needs, in download order.
 var geoAssets = []struct {
@@ -54,10 +62,10 @@ func GeoDataReady(dir string) bool {
 	return true
 }
 
-// DownloadGeoData fetches the missing databases into dir. Files already present
-// are left alone, so this doubles as a repair for a half-finished download.
-// logf receives one line per file, suitable for the GUI log panel.
-func DownloadGeoData(ctx context.Context, dir string, logf func(string)) error {
+// DownloadGeoData fetches the missing databases into dir. With force the files
+// are fetched again even when present (the manual "update" path). logf receives
+// one line per file, suitable for the GUI log panel or the LuCI service log.
+func DownloadGeoData(ctx context.Context, dir string, logf func(string), force bool) error {
 	if logf == nil {
 		logf = func(string) {}
 	}
@@ -67,16 +75,30 @@ func DownloadGeoData(ctx context.Context, dir string, logf func(string)) error {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	for _, a := range geoAssets {
 		dst := filepath.Join(dir, a.Name)
-		if fi, err := os.Stat(dst); err == nil && fi.Size() >= a.Min {
-			continue
+		if !force {
+			if fi, err := os.Stat(dst); err == nil && fi.Size() >= a.Min {
+				continue
+			}
 		}
-		url := geoDataTagURL + a.Name
-		logf(fmt.Sprintf("下载 %s（%s）…", a.Name, url))
-		n, err := fetchToFile(ctx, client, url, dst, a.Min)
-		if err != nil {
-			return fmt.Errorf("%s: %w", a.Name, err)
+		// Official source first, then the mirrors — same order as the pinned
+		// core download. Each candidate must pass the size floor on its own.
+		var lastErr error
+		ok := false
+		for _, base := range append([]string{""}, geoMirrors...) {
+			url := base + geoDataTagURL + a.Name
+			logf(fmt.Sprintf("下载 %s（%s）…", a.Name, url))
+			n, err := fetchToFile(ctx, client, url, dst, a.Min)
+			if err == nil {
+				logf(fmt.Sprintf("%s 完成（%.1f MB）", a.Name, float64(n)/(1024*1024)))
+				ok = true
+				break
+			}
+			lastErr = err
+			logf(fmt.Sprintf("%s 失败：%v", a.Name, err))
 		}
-		logf(fmt.Sprintf("%s 完成（%.1f MB）", a.Name, float64(n)/(1024*1024)))
+		if !ok {
+			return fmt.Errorf("%s: %w", a.Name, lastErr)
+		}
 	}
 	return nil
 }

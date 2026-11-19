@@ -43,6 +43,12 @@ const (
 	// One failure can be a busy core or a transient timeout; several spread
 	// over half a minute cannot.
 	healthFailLimit = 3
+	// guardRepairRoundLimit caps whole repair rounds (each round may try every
+	// cached candidate once). Without a cap, an evening of uniformly degraded
+	// upstream turns into an endless connect-rollback-repair cycle — the user
+	// sees "永远在连接" and has to pull the plug. After the cap the service
+	// stops itself and waits for an explicit user retry.
+	guardRepairRoundLimit = 2
 	// healthOwnerFile holds the pid of whoever currently owns this session's
 	// health check and repair. Exactly one owner at a time, enforced by a
 	// companion file lock and confirmed by whether that pid still runs — see
@@ -806,6 +812,12 @@ func giveUp(logf func(string)) {
 			return nil
 		})
 	}
+	// 路由器 TUN 会话的兜底：giveUp 只停内核，而 auto-route 遗留的策略路由、
+	// dnsmasq 上游、防火墙 zone 都归 init.d 管。交给它整套还原（幂等），避免
+	// 内核死了隧道残留把整屋流量导进黑洞。
+	if st0, err := loadState(); err == nil && st0.TUN && routerDeployed() {
+		stopRouterService(logf)
+	}
 	logf("已断开：请重新点击连接（会重新扫描端点）")
 }
 
@@ -845,6 +857,12 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 	logf(fmt.Sprintf("数据面守护已启动 (port=%d)", opts.mixedPort))
 
 	var fails int
+	// repairRounds 是完整修复轮（每轮最多尝试全部候选端点一遍）的计数。没有
+	// 上限的自动修复在链路整体劣化的夜里就是「永远在连接」：连接→回滚→修复
+	// →再连，永动机直到用户拔电源（2026-11-19 真机教训，用户原话：ace 发疯
+	// 了）。两轮修不好就老实停服务：失败要变成一个明确的状态，而不是一个
+	// 永不结束的过程。用户手动点连接随时可以再试。
+	var repairRounds int
 	// Fast local probe state: the previous /traffic sample lets us tell a
 	// trickle from a stop by comparing cumulative bytes between ticks.
 	var prevTraffic core.TrafficSample
@@ -900,6 +918,24 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 			prevTraffic, haveTraffic = sample, true
 		}
 		live := dataPlaneOK(res.OK, localMoving)
+		// LAN 保底（2026-11-19 第三次断网事故）：TUN 会话下，本机代理端口
+		// 通了不代表接管层通了 —— 接管层（fw zone 转发、dnsmasq 上游）故障时
+		// 本机探测全绿而整屋瘫痪，之前的 guard 对此完全失明。这里补两个探测，
+		// 任一不活都算数据面失败，攒够次数自动下线。HTTP 探测沿用慢链路宽恕
+		// （核心还在走流量就只算慢不算死），DNS 链路故障不宽恕 —— 解析挂了
+		// 整屋照样瘫痪，哪怕大流量还在走。
+		var lanFail string
+		if st.TUN {
+			if lerr := lanPlaneProbe(ctx, 8*time.Second); lerr != nil && !localMoving {
+				lanFail = "LAN 数据面: " + lerr.Error()
+			}
+			if derr := dnsPlaneProbe(ctx, 8*time.Second); derr != nil {
+				lanFail += " DNS 链路: " + derr.Error()
+			}
+			if lanFail != "" {
+				live = false
+			}
+		}
 		if verdict := judgeHealth(fails, live); !verdict.repair {
 			fails = verdict.fails
 			if live {
@@ -913,8 +949,21 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 				}
 				continue
 			}
-			logf(fmt.Sprintf("数据面探测失败 (%d/%d): %v", fails, healthFailLimit, res.Err))
+			if lanFail != "" {
+				logf(fmt.Sprintf("局域网探测失败 (%d/%d): %s", fails, healthFailLimit, lanFail))
+			} else {
+				logf(fmt.Sprintf("数据面探测失败 (%d/%d): %v", fails, healthFailLimit, res.Err))
+			}
 			continue
+		}
+		// 接管层故障的专用出口：本机代理端口仍然活着，说明端点和内核都没事，
+		// 轮换端点救不了局域网 —— 直接触发 init.d stop 无条件还原（fw zone、
+		// dnsmasq、路由），整屋回到直连，管理页保持可达。这是用户要的保底：
+		// ace 必须自己下线，不能挂着「已连接」的假象等人来救。
+		if st.TUN && res.OK && routerDeployed() {
+			logf("本机代理正常但局域网持续不通：接管层故障，自动停止服务还原局域网")
+			stopRouterService(logf)
+			return nil
 		}
 		logf(fmt.Sprintf("数据面探测失败 (%d/%d): %v", healthFailLimit, healthFailLimit, res.Err))
 		// An OpenVPN session is repaired by rotating the VPN Gate relay, not by
@@ -1011,6 +1060,16 @@ func runHealthGuardCmd(ctx context.Context, opts options) error {
 		repairOpts.apiPort = st.APIPort
 		tried := map[string]bool{}
 		if fe := ctx.Err(); fe != nil {
+			return nil
+		}
+		repairRounds++
+		if repairRounds > guardRepairRoundLimit {
+			logf(fmt.Sprintf("自动修复已连续 %d 轮失败，停止自动重连（避免无限循环）", repairRounds-1))
+			if st.TUN && routerDeployed() {
+				stopRouterService(logf)
+				return nil
+			}
+			giveUp(logf)
 			return nil
 		}
 		if _, ok := repairOnce(ctx, repairOpts, st.Endpoint, tried, logf); ok {

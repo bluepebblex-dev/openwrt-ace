@@ -44,5 +44,11 @@ config ace 'main'
 	# 从路由器侧无法区分，介意误重启的设成 none。
 	option watchdog_action 'reboot'
 
+	# 分流模式：bypass = 出国流量走隧道、国内直连（默认，也是唯一暴露的
+	# 产品形态——不支持自定义分流规则）；global = 全部走隧道；direct = 全直连。
+	# 引擎渲染分流规则需要 geo 数据（geosite.dat + geoip.metadb），缺失时
+	# 连接前自动下载，设置页也可手动更新。
+	option split 'bypass'
+
 	# 是否使用 IPv6 端点池
 	option ipv6 '0'

@@ -20,6 +20,10 @@ DNS_BAK=$ACE_HOME/dns.bak
 TUN_DEV=ace0
 DNS_PORT=7874
 WATCH_FLAG=/var/run/ace-watchdog
+# 就绪标记：post_up 加完防火墙 zone 后 touch。引擎 adoptTun 等它出现才宣告
+# connected —— 防火墙没落地就宣告成功，LAN→TUN 转发全被 fw4 丢弃（2026-11-19
+# 第三次断网事故的直接原因）。
+ACE_READY=/var/run/ace-ready
 WATCH_LOG=/var/log/ace-watchdog.log
 ACE_LOCK=/var/run/.ace.lock
 ACE_PENDING=/var/run/ace.pending
@@ -212,7 +216,11 @@ resolver_listening() {
 # tun 设备出现 + 内核解析器在听，之后才有必要改 dnsmasq 和防火墙。
 post_up() {
 	local i=0
-	while [ "$i" -lt 180 ]; do
+	# 900 秒而不是 180：connect 首次运行要先下载分流数据（geo，约 12 MB，
+	# 直连 GitHub 可能要几分钟）再扫描、连接、建 TUN —— 180 秒窗口在真机上
+	# 会在 ace0 出现前几十秒放弃，之后防火墙 zone 永远不会再加，整屋流量被
+	# fw4 丢弃（2026-11-19 第三次断网事故）。等待期间 flag 没了立刻收手。
+	while [ "$i" -lt 900 ]; do
 		# 用户可能在这几十秒里点了断开：WATCH_FLAG 没了就立刻收手，
 		# 否则 stop 清完 zone/DNS 后我们又给加回去（真竞态，不是理论）。
 		[ -f "$WATCH_FLAG" ] || { logger -t ace "post_up: 服务已停止，取消接管"; return 0; }
@@ -237,6 +245,8 @@ post_up() {
 			# 流表里已有的连接还走老路由，清掉让它们重新选路
 			command -v conntrack >/dev/null 2>&1 && conntrack -F >/dev/null 2>&1
 			logger -t ace "隧道就绪：$TUN_DEV 已建立"
+			# 告诉引擎接管层已就绪，它要验证局域网数据面后才宣告 connected
+			touch "$ACE_READY"
 
 			# 死手开关：隧道起来了但确实不通时，宁可自己断开也不要让整屋
 			# 挂在一个"显示已连接"的假象上。三次机会，每次间隔 15 秒。
@@ -260,7 +270,10 @@ post_up() {
 		i=$((i + 1))
 		sleep 1
 	done
-	logger -t ace "180 秒内未等到 $TUN_DEV，放弃接管"
+	logger -t ace "900 秒内未等到 $TUN_DEV，停止服务（不留下接管了一半的假连接）"
+	# 放弃接管不等于结束：引擎还在跑、guard 还在守，服务会一直挂着「已连接」。
+	# 直接走完整 stop（幂等），把 dns/防火墙/路由全部还原——宁可自己下线。
+	/etc/init.d/ace stop
 	return 1
 }
 
@@ -309,6 +322,7 @@ start_service() {
 	# pending 标记保留到隧道真正就绪/连接断开才清——它要覆盖整个 post_up 期间。
 	if [ "$(cfg_get tun)" = "1" ]; then
 		: > "$WATCH_FLAG"
+		rm -f "$ACE_READY"
 	fi
 	drop_lock
 	if [ "$(cfg_get tun)" = "1" ]; then
@@ -426,7 +440,7 @@ stop_service() {
 	[ -f "$DNS_BAK" ] && dns_restore
 	dns_panic_restore
 	fw_zone_del
-	rm -f "$WATCH_FLAG"
+	rm -f "$WATCH_FLAG" "$ACE_READY"
 	drop_lock
 	logger -t ace "服务已停止"
 }
