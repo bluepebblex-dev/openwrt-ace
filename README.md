@@ -335,7 +335,7 @@ openwrt-ace/
 
 <div align="center">
 
-**powered by ACE 🂡 & Polaris** 🌟
+**powered by ACE ♥️ & Polaris** ✨
 
 </div>
 
