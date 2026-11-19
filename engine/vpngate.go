@@ -1135,8 +1135,9 @@ func sortVPNGateNodes(nodes []vpnGateNode) {
 	})
 }
 
-// vpnGateCandidates filters by country (empty = all), measures reachability and
-// orders the nodes a connect will try, using the phone client's failover logic:
+// vpnGateCandidates filters by country (empty = all), measures nodes that still
+// lack a latency reading, and orders the nodes a connect will try, using the
+// phone client's failover logic:
 //
 //   - a pinned relay first;
 //   - then the same country, same class (another residential for a residential
@@ -1155,6 +1156,13 @@ func sortVPNGateNodes(nodes []vpnGateNode) {
 // reachable through WARP even when direct TCP is blocked, and dropping every
 // such node would contradict the fallback fetch.
 func vpnGateCandidates(ctx context.Context, nodes []vpnGateNode, region, pin string, max int) []vpnGateNode {
+	return vpnGateCandidatesWithProbe(ctx, nodes, region, pin, max, measureVPNGateLatency)
+}
+
+// vpnGateCandidatesWithProbe keeps the one synchronously expensive ordering
+// step injectable so the "reuse a cached measurement" policy can be tested
+// without touching the network. Production always passes measureVPNGateLatency.
+func vpnGateCandidatesWithProbe(ctx context.Context, nodes []vpnGateNode, region, pin string, max int, probeLatency func(context.Context, []vpnGateNode)) []vpnGateNode {
 	region = strings.ToUpper(strings.TrimSpace(region))
 	valid := make([]vpnGateNode, 0, len(nodes))
 	var pinNode *vpnGateNode
@@ -1193,9 +1201,13 @@ func vpnGateCandidates(ctx context.Context, nodes []vpnGateNode, region, pin str
 		targetCls = pinNode.classKey()
 	}
 
-	// Probe the head of the target country, chosen by class + API ping so the
-	// probe budget is spent on the blocks that would actually be tried first.
-	// A pinned node outside that head is probed too.
+	// Probe only the nodes that have never been measured. A node carrying
+	// LatencyMS already has a value from the route that delivered the list:
+	// on the mainland that is the WARP netstack, while measureVPNGateLatency
+	// dials from the host's own route. Re-probing it would both mismeasure the
+	// chain and cost up to 9s on every connect (18 nodes / 8 jobs / 3s each)
+	// for an ordering hint that gets thrown away when the dials all time out.
+	// Cached values stay on `valid`, so the sort below still sees them.
 	probePool := valid
 	if targetCC != "" {
 		var in []vpnGateNode
@@ -1208,15 +1220,20 @@ func vpnGateCandidates(ctx context.Context, nodes []vpnGateNode, region, pin str
 			probePool = in
 		}
 	}
-	probePool = append([]vpnGateNode(nil), probePool...)
-	sortVPNGateNodesByLatency(probePool)
+	var pending []vpnGateNode
+	for _, n := range probePool {
+		if n.LatencyMS <= 0 {
+			pending = append(pending, n)
+		}
+	}
+	sortVPNGateNodesByLatency(pending)
 	const probeMax = 18
-	n := len(probePool)
+	n := len(pending)
 	if n > probeMax {
 		n = probeMax
 	}
-	probe := append([]vpnGateNode(nil), probePool[:n]...)
-	if pinNode != nil {
+	probe := append([]vpnGateNode(nil), pending[:n]...)
+	if pinNode != nil && pinNode.LatencyMS <= 0 {
 		found := false
 		for _, p := range probe {
 			if p.id() == pinNode.id() {
@@ -1228,7 +1245,11 @@ func vpnGateCandidates(ctx context.Context, nodes []vpnGateNode, region, pin str
 			probe = append(probe, *pinNode)
 		}
 	}
-	measureVPNGateLatency(ctx, probe)
+	if len(probe) > 0 && probeLatency != nil {
+		probeLatency(ctx, probe)
+	} else if len(valid) > 0 && len(pending) == 0 {
+		stageMsg(fmt.Sprintf("复用 %d 个出口节点的缓存延迟，跳过直连探测", len(valid)))
+	}
 	lat := make(map[string]int64, len(probe))
 	for _, p := range probe {
 		if p.LatencyMS > 0 {

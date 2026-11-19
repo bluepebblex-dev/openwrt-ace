@@ -289,6 +289,49 @@ func TestVPNGateCandidatesClassFailover(t *testing.T) {
 		"203.0.113.13", "203.0.113.14", "203.0.113.12", "203.0.113.11", "203.0.113.10")
 }
 
+// TestVPNGateCandidatesReusesCachedLatency pins the connect-time saving: nodes
+// fetched through the WARP netstack already carry a usable LatencyMS. Re-probing
+// them from the host's own route is both slow (18 nodes / 8 jobs / 3s each) and
+// misleading on a mainland network, so only unmeasured nodes may be probed.
+func TestVPNGateCandidatesReusesCachedLatency(t *testing.T) {
+	t.Setenv("WARP_CLIENT_HOME", t.TempDir())
+	nodes := []vpnGateNode{
+		{IP: "203.0.113.41", Port: 443, Proto: "tcp", Profile: "p", CountryShort: "JP", Class: "residential", LatencyMS: 120},
+		{IP: "203.0.113.42", Port: 443, Proto: "tcp", Profile: "p", CountryShort: "JP", Class: "residential", LatencyMS: 40},
+	}
+	probes := 0
+	got := vpnGateCandidatesWithProbe(context.Background(), nodes, "JP", "", 24,
+		func(_ context.Context, probed []vpnGateNode) {
+			probes++
+			t.Fatalf("unexpected direct probe of cached nodes: %+v", probed)
+		})
+	if probes != 0 {
+		t.Fatalf("probe called %d times, want 0", probes)
+	}
+	if got[0].IP != "203.0.113.42" {
+		t.Fatalf("cached latency not used for order: %+v", got)
+	}
+
+	// The second node loses its measurement: exactly that node must be probed,
+	// and its fresh value must feed the same ordering logic.
+	nodes[1].LatencyMS = 0
+	probes = 0
+	got = vpnGateCandidatesWithProbe(context.Background(), nodes, "JP", "", 24,
+		func(_ context.Context, probed []vpnGateNode) {
+			probes++
+			if len(probed) != 1 || probed[0].IP != "203.0.113.42" {
+				t.Fatalf("probe list = %+v, want only the unmeasured node", probed)
+			}
+			probed[0].LatencyMS = 10
+		})
+	if probes != 1 {
+		t.Fatalf("probe called %d times, want 1", probes)
+	}
+	if got[0].IP != "203.0.113.42" {
+		t.Fatalf("fresh probe did not feed ordering: %+v", got)
+	}
+}
+
 // TestVPNGateFailureMemory checks that a relay that just failed is skipped, and
 // that clearing the failure makes it eligible again.
 func TestVPNGateFailureMemory(t *testing.T) {
