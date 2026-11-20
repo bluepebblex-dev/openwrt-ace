@@ -234,11 +234,12 @@ func TestRenderCaptureAndFamily(t *testing.T) {
 		{
 			name:   "tun",
 			mutate: func(o *options) { o.tunMode = true },
-			// Port 53, not 1053: TUN mode points the host resolver at this
-			// listener, and networksetup can only be told a host. A high port
-			// would leave the system resolver on the LAN gateway and poison
-			// every blocked name (see internal/core/systemdns_darwin.go).
-			want:    []string{"tun:\n  enable: true", "listen: 127.0.0.1:53"},
+			// The DNS listener address is platform-dependent: macOS uses
+			// 127.0.0.1:53 because networksetup can only name a host, while
+			// the router (Linux) keeps 53 for dnsmasq and the core listens
+			// on a private port instead (see tunDNSListen). Assert against
+			// the live value so the test holds on both GOOS.
+			want:    []string{"tun:\n  enable: true", "listen: " + tunDNSListen()},
 			notWant: []string{"listen: 127.0.0.1:1053"},
 		},
 		{
