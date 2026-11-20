@@ -1,10 +1,13 @@
 <div align="center">
 
+<img src="docs/logo.png" alt="ACE × Polaris" width="132" height="132"/>
+
 # ACE for OpenWrt
 
 **把整屋网络装进一台路由器 —— Cloudflare WARP 全屋出口，点一下就连**
 
 [![release](https://img.shields.io/github/v/release/bluepebblex-dev/openwrt-ace?style=flat-square&color=2ea043)](https://github.com/bluepebblex-dev/openwrt-ace/releases)
+[![CI](https://github.com/bluepebblex-dev/openwrt-ace/actions/workflows/ci.yml/badge.svg)](https://github.com/bluepebblex-dev/openwrt-ace/actions/workflows/ci.yml)
 [![license](https://img.shields.io/github/license/bluepebblex-dev/openwrt-ace?style=flat-square)](LICENSE)
 [![platform](https://img.shields.io/badge/OpenWrt-24.10-00a4d8?style=flat-square)](https://openwrt.org)
 [![arch](https://img.shields.io/badge/arch-aarch64__cortex--a53-6e7781?style=flat-square)](#安装)
@@ -338,7 +341,8 @@ VER=1.2.1 ./build-ipk.sh    # 指定版本号
 openwrt-ace/
 ├── build-ipk.sh              # 不依赖 OpenWrt SDK 直接产出 ipk
 ├── install.sh                # 上传 + 安装到路由器
-├── docs/                     # README 用截图与概念动画
+├── docs/                     # README 用 logo、截图与概念动画
+│   ├── logo.png              # 项目 logo（ACE × Polaris）
 │   ├── screenshots/          # LuCI 真机截图、架构图
 │   └── demo/                 # 三条状态概念 GIF（Muse 生成）
 ├── engine/                   # Go 引擎（WARP 注册、端点扫描、mihomo 渲染、会话守护）
