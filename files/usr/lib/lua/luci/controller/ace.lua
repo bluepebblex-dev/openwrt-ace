@@ -30,6 +30,7 @@ function index()
 	entry({"admin", "services", "ace", "api", "status"}, call("api_status")).leaf = true
 	entry({"admin", "services", "ace", "api", "diagnose"}, call("api_diagnose")).leaf = true
 	entry({"admin", "services", "ace", "api", "probe"}, call("api_probe")).leaf = true
+	entry({"admin", "services", "ace", "api", "quality"}, call("api_quality")).leaf = true
 	entry({"admin", "services", "ace", "api", "action"}, call("api_action")).leaf = true
 	entry({"admin", "services", "ace", "api", "log"}, call("api_log")).leaf = true
 	entry({"admin", "services", "ace", "api", "settings"}, call("api_settings")).leaf = true
@@ -610,6 +611,38 @@ function api_probe()
 		bottleneck_ms = worst and worst.tls_ms or 0,
 		bottleneck_site = worst and worst.label or "",
 	})
+end
+
+-- 24h 网络质量曲线：只读 diag.db 的 probe 表（diag_collect.sh 每 30 分钟采一次）。
+-- 不碰 TUN/路由/DNS；没有诊断库时返回空 rows，前端整卡隐藏。
+local QUALITY_DB = "/etc/ace/diag.db"
+local QUALITY_SITES = {
+	{ key = "youtube", label = "YouTube", color = "#3ddc84" },
+	{ key = "google",  label = "Google",  color = "#4cc9f0" },
+	{ key = "github",  label = "GitHub",  color = "#f4a259" },
+	{ key = "baidu",   label = "国内对照", color = "#8b8f98" },
+}
+
+function api_quality()
+	local rows = {}
+	if fs.access(QUALITY_DB) then
+		local raw = sys.exec(
+			"sqlite3 -noheader -list '" .. QUALITY_DB .. "'"
+			.. " \"select ts, site, total_ms from probe where ts > strftime('%s','now') - 86400 order by ts;\" 2>/dev/null") or ""
+		-- sqlite3 -list 的字段分隔符是 | 不是制表符，解析按 | 来
+		for line in raw:gmatch("[^\n]+") do
+			local ts, site, ms = line:match("^(%d+)%s*[|%t]+%s*(%S+)%s*[|%t]+%s*(%d+)")
+			if ts and site and ms then
+				rows[#rows + 1] = { ts = tonumber(ts), site = site, ms = tonumber(ms) }
+			end
+		end
+	end
+	local sites = {}
+	for _, s in ipairs(QUALITY_SITES) do
+		sites[#sites + 1] = s
+	end
+	http.prepare_content("application/json")
+	http.write_json({ sites = sites, rows = rows, at = os.time() })
 end
 
 function api_action()

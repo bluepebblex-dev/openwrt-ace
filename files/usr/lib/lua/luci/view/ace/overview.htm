@@ -187,6 +187,21 @@
 	.ace-probe-foot .verdict.bad { color: #f2687e; }
 	.ace-probe-foot .verdict.warn { color: #ff9838; }
 
+	/* 24h 网络质量曲线（diag.db 每 30 分钟采样，只读） */
+	.ace-quality {
+		margin-top: 12px; background: linear-gradient(180deg, #121216 0%, #0d0d10 100%);
+		border: 1px solid rgba(255,255,255,.08); border-radius: 20px; padding: 14px 18px 10px; color: #cfd3da;
+		box-shadow: 0 14px 40px rgba(0,0,0,.22);
+	}
+	.ace-quality-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+	.ace-quality-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: #e8eaee; }
+	.ace-quality-title .sub { font-size: 11px; font-weight: 400; color: #8b8f98; }
+	.ace-quality-legend { display: flex; gap: 12px; flex-wrap: wrap; }
+	.ace-quality-legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #8b8f98; }
+	.ace-quality-legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+	.ace-quality svg { display: block; width: 100%; height: auto; margin-top: 8px; }
+	.ace-quality-foot { margin-top: 6px; font-size: 11.5px; line-height: 1.55; color: #7b8089; }
+
 	/* 流量走势（渐变面积图，见 .ace-flow-chart） */
 
 	/* 诊断结果 */
@@ -304,6 +319,15 @@
 		<div class="ace-probe-foot" id="probeFoot">四个站发真实请求，10 秒内返回。国外站应通、国内对照应直连；测的是路由器出口，代表整屋。</div>
 	</div>
 
+	<div class="ace-quality" id="qualityCard" style="display:none">
+		<div class="ace-quality-head">
+			<div class="ace-quality-title">📈 24h 网络质量 <span class="sub">每 30 分钟自动采样，看趋势不看单点</span></div>
+			<div class="ace-quality-legend" id="qualityLegend"></div>
+		</div>
+		<svg id="qualitySvg" viewBox="0 0 600 180" preserveAspectRatio="none" aria-label="24 小时网络质量曲线"></svg>
+		<div class="ace-quality-foot" id="qualityFoot"></div>
+	</div>
+
 	<div class="ace-link" id="linkCard">
 		<div class="badge">⛓</div>
 		<div style="min-width:0;flex:1">
@@ -367,6 +391,7 @@ var ACE_LOG = '<%=url("admin/services/ace/api/log")%>';
 var ACE_SAVE = '<%=url("admin/services/ace/api/save")%>';
 var ACE_DIAG = '<%=url("admin/services/ace/api/diagnose")%>';
 var ACE_PROBE = '<%=url("admin/services/ace/api/probe")%>';
+var ACE_QUALITY = '<%=url("admin/services/ace/api/quality")%>';
 var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var aceBusy = false;
 var aceLast = null;   /* 上一次 status（流量速率用总量差算） */
@@ -960,6 +985,87 @@ function aceProbe() {
 	x.send();
 }
 
+/* ---- 24h 网络质量曲线：只读 diag.db，服务端已按 24h 过滤 ---- */
+function aceLoadQuality() {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_QUALITY + '?t=' + Date.now(), true);
+	x.timeout = 10000;
+	x.onload = function () {
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) {}
+		var card = document.getElementById('qualityCard');
+		if (!d || !d.rows || d.rows.length < 2) {
+			/* 诊断库还没积累够数据，整卡隐藏，不给一两条线的假趋势 */
+			card.style.display = 'none';
+			return;
+		}
+		card.style.display = '';
+		var svg = aceQualitySvg(d);
+		document.getElementById('qualitySvg').outerHTML = svg;
+		var n = {};
+		for (var i = 0; i < d.rows.length; i++) n[d.rows[i].site] = (n[d.rows[i].site] || 0) + 1;
+		document.getElementById('qualityFoot').textContent =
+			'最近 24 小时共 ' + d.rows.length + ' 个采样（' +
+			Object.keys(n).map(function (k) { return n[k] + ' 次/' + k; }).join('，') +
+			'）。采样由诊断任务每 30 分钟发一次真实请求完成，曲线越平越稳；尖峰看是只升外国线（跨境链路波动）还是连国内对照一起升（本地 ISP 拥塞）。';
+	};
+	x.ontimeout = function () {};
+	x.onerror = function () {};
+	x.send();
+}
+
+function aceQualitySvg(d) {
+	var W = 600, H = 180, padL = 46, padR = 10, padT = 12, padB = 24;
+	var at = d.at || Math.floor(Date.now() / 1000);
+	var t1 = at, t0 = at - 86400;
+	var maxMs = 1000, i, r;
+	for (i = 0; i < d.rows.length; i++) {
+		if (d.rows[i].ms > maxMs) maxMs = d.rows[i].ms;
+	}
+	maxMs = Math.ceil(maxMs / 500) * 500;
+	function X(t) { return (padL + (t - t0) / 86400 * (W - padL - padR)).toFixed(1); }
+	function Y(ms) { return (padT + (1 - ms / maxMs) * (H - padT - padB)).toFixed(1); }
+	function hhmm(t) {
+		var s = new Date(t * 1000).toTimeString().slice(0, 5);
+		return s;
+	}
+	var s = '<svg id="qualitySvg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-label="24 小时网络质量曲线">';
+	/* 水平网格 + y 轴标签：取 4 格 */
+	for (i = 0; i <= 4; i++) {
+		var ms = maxMs * i / 4;
+		var y = Y(ms);
+		s += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="rgba(255,255,255,.07)"/>';
+		var lab = ms >= 1000 ? (ms / 1000).toFixed(ms % 1000 ? 1 : 0) + 's' : ms + 'ms';
+		s += '<text x="' + (padL - 6) + '" y="' + (+y + 3) + '" text-anchor="end" font-size="9" fill="#6f7480">' + lab + '</text>';
+	}
+	/* 时间刻度：每 6 小时 */
+	for (i = 0; i <= 4; i++) {
+		var t = t0 + 86400 * i / 4;
+		s += '<text x="' + X(t) + '" y="' + (H - 8) + '" text-anchor="middle" font-size="9" fill="#6f7480">' + hhmm(t) + '</text>';
+	}
+	/* 各站折线 + 采样点 */
+	for (i = 0; i < d.sites.length; i++) {
+		var site = d.sites[i];
+		var pts = [];
+		for (var j = 0; j < d.rows.length; j++) {
+			if (d.rows[j].site === site.key) pts.push(d.rows[j]);
+		}
+		if (pts.length < 1) continue;
+		var path = pts.map(function (p, k) {
+			return (k ? 'L' : 'M') + X(p.ts) + ' ' + Y(p.ms);
+		}).join(' ');
+		s += '<path d="' + path + '" fill="none" stroke="' + site.color + '" stroke-width="1.8" stroke-linejoin="round" opacity=".92"/>';
+		for (var k = 0; k < pts.length; k++) {
+			s += '<circle cx="' + X(pts[k].ts) + '" cy="' + Y(pts[k].ms) + '" r="2.4" fill="' + site.color + '" stroke="#0d0d10" stroke-width="1"/>';
+		}
+	}
+	s += '</svg>';
+	document.getElementById('qualityLegend').innerHTML = d.sites.map(function (st) {
+		return '<span><i style="background:' + st.color + '"></i>' + st.label + '</span>';
+	}).join('');
+	return s;
+}
+
 function aceToggle() {
 	/* 断开直接执行，不再弹确认：状态卡和日志已经足够反馈，多一次点击反而碍事。 */
 	aceBusy = true;
@@ -1039,10 +1145,13 @@ requestAnimationFrame(ringDraw);
 aceDialState('off');
 acePoll();
 aceLoadLog();
+aceLoadQuality();
 setInterval(acePoll, 2500);
 setInterval(aceLoadLog, 8000);
+/* 采样粒度是 30 分钟，质量图 60s 刷一次足够，不占 ubus 带宽 */
+setInterval(aceLoadQuality, 60000);
 document.addEventListener('visibilitychange', function () {
-	if (!document.hidden) { acePoll(); aceLoadLog(); }
+	if (!document.hidden) { acePoll(); aceLoadLog(); aceLoadQuality(); }
 });
 </script>
 
