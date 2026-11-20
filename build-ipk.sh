@@ -245,5 +245,20 @@ ipk("luci-app-ace", ver, "all", "libc, ace, luci-compat",
 PY
 
 echo
+echo "==> checksums"
+# 发布用：只写文件名（不带 dist/ 前缀），保证下载目录里 shasum -c 直接通过。
+# 用 python3 而不是 shasum/sha256sum——两者在不同发行版上名字和选项都不一致。
+(cd "$DIST" && python3 - <<'PYCHK'
+import glob, hashlib
+lines = []
+for f in sorted(glob.glob("*.ipk")):
+    h = hashlib.sha256(open(f, "rb").read()).hexdigest()
+    lines.append("%s  %s" % (h, f))
+    print("  %s  %s" % (h, f))
+open("checksums.txt", "w").write("\n".join(lines) + "\n")
+PYCHK
+)
+
+echo
 echo "产物："
 ls -la "$DIST"
