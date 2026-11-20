@@ -535,6 +535,9 @@ end
 -- 三个国外站 + 一个国内对照；国内对照必须通而国外站不通，就是没接管成功。
 -- 探测从路由器发出，和 LAN 客户端走同一条 TUN 数据面，所以能代表整屋。
 -- 四个 curl 并发跑：串行的话晚高峰单个站 10s 超时，四次要等 40s。
+-- 计时拆成四段：总耗时 / TLS 握手 / 首包等待 / DNS。桌面实测握手占境外请求 61%，
+-- 只报 total 会把「节点 RTT 高」误读成「带宽慢」，加带宽永远治不好。
+-- 老版本 busybox curl 可能没有 time_appconnect：解析时兜底为 0，前端不显示该段。
 local PROBE_TARGETS = {
 	{ key = "youtube", label = "YouTube", url = "https://www.youtube.com/generate_204" },
 	{ key = "google",   label = "Google",  url = "https://www.google.com/generate_204" },
@@ -549,22 +552,53 @@ function api_probe()
 		local f = "/tmp/ace-probe-" .. t.key
 		files[#files + 1] = f
 		cmds[#cmds + 1] = "curl -s -m " .. PROBE_TIMEOUT .. " -o /dev/null"
-			.. " -w '%{http_code} %{time_total}' '" .. t.url .. "' > '" .. f .. "' 2>/dev/null &"
+			.. " -w '%{http_code} %{time_total} %{time_appconnect} %{time_starttransfer} %{time_namelookup}'"
+			.. " '" .. t.url .. "' > '" .. f .. "' 2>/dev/null &"
 	end
 	sys.exec("rm -f " .. table.concat(files, " ") .. "; " .. table.concat(cmds, " ") .. " wait")
 
 	local rows, foreign_ok = {}, 0
 	for _, t in ipairs(PROBE_TARGETS) do
 		local raw = fs.readfile("/tmp/ace-probe-" .. t.key) or ""
-		local code_s, sec_s = raw:match("^(%d+)%s+([%d%.]+)")
+		-- 五段格式；老 curl 只输出前两段，后三段兜底 0（前端据此不显示）
+		local code_s, total_s, tls_s, first_s, dns_s =
+			raw:match("^(%d+)%s+([%d%.]+)%s+([%d%.]+)%s+([%d%.]+)%s+([%d%.]+)")
+		if not code_s then
+			code_s, total_s = raw:match("^(%d+)%s+([%d%.]+)")
+		end
 		local code = tonumber(code_s) or 0
-		local ms = sec_s and math.floor(tonumber(sec_s) * 1000 + 0.5) or 0
+		local ms = total_s and math.floor(tonumber(total_s) * 1000 + 0.5) or 0
 		local ok = code >= 200 and code < 400
 		if t.key ~= "baidu" and ok then foreign_ok = foreign_ok + 1 end
+		-- 首包等待 = 从建连完成到收到第一个字节，包含服务端响应；握手不计入
+		local tls_ms = tls_s and math.floor(tonumber(tls_s) * 1000 + 0.5) or 0
+		local wait_ms = (first_s and tls_s)
+			and math.floor((tonumber(first_s) - tonumber(tls_s)) * 1000 + 0.5) or 0
+		if wait_ms < 0 then wait_ms = 0 end
+		local dns_ms = dns_s and math.floor(tonumber(dns_s) * 1000 + 0.5) or 0
 		rows[#rows + 1] = {
 			key = t.key, label = t.label, ok = ok,
 			code = code, ms = ms, url = t.url,
+			tls_ms = tls_ms, wait_ms = wait_ms, dns_ms = dns_ms,
 		}
+	end
+	-- 瓶颈判定：取境外站里握手耗时最大的那个。握手 > 0.5s 且占该站总耗时一半以上，
+	-- 才认定 RTT 瓶颈；否则握手只是小头，不该误导用户去换节点。
+	-- 握手数据全为 0（老 curl 不支持）时返回 unknown，前端不显示推断。
+	local worst, bottleneck = nil, "unknown"
+	for _, r in ipairs(rows) do
+		if r.key ~= "baidu" and r.tls_ms > 0 and (not worst or r.tls_ms > worst.tls_ms) then
+			worst = r
+		end
+	end
+	if worst then
+		if worst.tls_ms >= 500 and worst.tls_ms * 2 >= worst.ms then
+			bottleneck = "rtt"
+		elseif worst.wait_ms >= 800 then
+			bottleneck = "server"
+		else
+			bottleneck = "mixed"
+		end
 	end
 	local st = read_state() or {}
 	http.prepare_content("application/json")
@@ -572,6 +606,9 @@ function api_probe()
 		rows = rows, foreign_ok = foreign_ok, foreign_total = 3,
 		connected = st.connected and true or false,
 		exit_ip = st.exit_ip or "", at = os.time(),
+		bottleneck = bottleneck,
+		bottleneck_ms = worst and worst.tls_ms or 0,
+		bottleneck_site = worst and worst.label or "",
 	})
 end
 

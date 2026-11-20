@@ -178,7 +178,9 @@
 	.ace-probe-item.ok .st { background: #3ddc84; box-shadow: 0 0 9px rgba(61,220,132,.55); }
 	.ace-probe-item.bad .st { background: #f2687e; box-shadow: 0 0 9px rgba(242,104,126,.45); }
 	.ace-probe-item .nm { font-size: 12px; font-weight: 600; color: #e8eaee; white-space: nowrap; }
-	.ace-probe-item .dt { margin-left: auto; font-size: 11px; color: #8b8f98; font-variant-numeric: tabular-nums; }
+	.ace-probe-item .dt { margin-left: auto; font-size: 11px; color: #8b8f98; font-variant-numeric: tabular-nums; text-align: right; }
+	.ace-probe-item .dt .tls { display: block; font-size: 10px; color: #6f7480; }
+	.ace-probe-item .dt .tls.slow { color: #ff9838; }
 	.ace-probe-foot { margin-top: 10px; font-size: 11.5px; line-height: 1.55; color: #7b8089; }
 	.ace-probe-foot .verdict { font-weight: 600; }
 	.ace-probe-foot .verdict.ok { color: #3ddc84; }
@@ -910,6 +912,11 @@ function aceProbe() {
 			r = d.rows[i];
 			if (r.key === 'baidu') cnOk = !!r.ok;
 			var dt = r.code > 0 ? (r.code + ' · ' + (r.ms / 1000).toFixed(2) + 's') : '超时/不可达';
+			/* 握手数据只在 curl 支持 time_appconnect 时才有；0 表示不支持或没测到，不显示 */
+			var tlsMs = Number(r.tls_ms) || 0;
+			if (tlsMs > 0 && r.key !== 'baidu') {
+				dt += '<span class="tls' + (tlsMs >= 500 ? ' slow' : '') + '">握手 ' + (tlsMs / 1000).toFixed(2) + 's</span>';
+			}
 			html += '<div class="ace-probe-item ' + (r.ok ? 'ok' : 'bad') + '">'
 				+ '<span class="st"></span><span class="nm">' + r.label + '</span>'
 				+ '<span class="dt">' + dt + '</span></div>';
@@ -932,11 +939,21 @@ function aceProbe() {
 		} else {
 			cls = 'bad'; txt = '国外站全不可达 —— 「已连接」是假象，实际没出国。';
 		}
+		/* 瓶颈提示：只在连通性正常时给——全不通时「换节点」是废话，先解决通不通 */
+		var hint = '';
+		if (d.connected && d.foreign_ok === 3 && d.bottleneck && d.bottleneck !== 'unknown') {
+			if (d.bottleneck === 'rtt') {
+				hint = ' · <span class="verdict warn">瓶颈在加密握手：' + d.bottleneck_site
+					+ ' ' + (d.bottleneck_ms / 1000).toFixed(2) + 's 占总耗时过半。换低延迟节点有效，加带宽无效。</span>';
+			} else if (d.bottleneck === 'server') {
+				hint = ' · <span class="verdict warn">握手正常但首包慢，问题在节点出口到站点的链路，换出口地区试试。</span>';
+			}
+		}
 		var at = d.at ? new Date(d.at * 1000).toTimeString().slice(0, 8) : '';
 		btn.disabled = false;
 		btn.textContent = '一键测';
 		document.getElementById('probeFoot').innerHTML = '<span class="verdict ' + cls + '">' + txt + '</span>'
-			+ (d.exit_ip ? ' · 出口 ' + d.exit_ip : '') + (at ? ' · 测于 ' + at : '');
+			+ hint + (d.exit_ip ? ' · 出口 ' + d.exit_ip : '') + (at ? ' · 测于 ' + at : '');
 	};
 	x.ontimeout = function () { aceProbeDone('探测超时（25 秒），看下面的运行日志。', 'bad'); };
 	x.onerror = function () { aceProbeDone('探测请求失败。', 'bad'); };
