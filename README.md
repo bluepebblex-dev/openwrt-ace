@@ -10,7 +10,7 @@
 [![arch](https://img.shields.io/badge/arch-aarch64__cortex--a53-6e7781?style=flat-square)](#安装)
 [![last commit](https://img.shields.io/github/last-commit/bluepebblex-dev/openwrt-ace?style=flat-square)](https://github.com/bluepebblex-dev/openwrt-ace/commits/main)
 
-[安装](#安装) · [首次连接](#首次连接两步走) · [界面](#界面) · [协议](#支持的协议) · [设计取舍](#设计取舍) · [排障](#排障)
+[安装](#安装) · [首次连接](#首次连接两步走) · [界面](#界面) · [视觉](#视觉符号从橙色待命到青绿就绪) · [协议](#支持的协议) · [设计取舍](#设计取舍) · [排障](#排障)
 
 </div>
 
@@ -141,6 +141,15 @@ TUN 之后 LAN 侧设备直接失联、路由器 IP 不可达但 WAN 还活着�
 
 **设置页** —— 连接方式、TUN 接管、DNS 接管 / 防泄漏、LAN 失联自愈等运行参数，保存后服务自动重启
 （隧道重建约 10~20 秒）。
+
+### 视觉符号：从橙色待命到青绿就绪
+
+ACE 把「还没连」「正在绕行」「已经就绪」做成一套颜色语言：橙色是待命与告警，青绿是链路建立后的
+确认。下面三条循环动画是首页的视觉基调——它们是概念动画，不是抓包或测速画面，用来让状态一眼可读。
+
+| 星盘启动 · 待命 → 链路点亮 | 数据绕行 · 风险区 → 青绿节点 | 速度成形 · 橙色光轨 → 青绿护盾 |
+|---|---|---|
+| ![橙色星盘过渡到青绿色星盘](docs/demo/stardial-orange-to-green.gif) | ![红色数据流区域过渡到青绿色节点](docs/demo/dataflow-red-to-green.gif) | ![橙色高速光轨过渡到青绿色护盾](docs/demo/speed-orange-to-shield.gif) |
 
 <details>
 <summary>设置页截图</summary>
@@ -323,6 +332,9 @@ VER=1.2.1 ./build-ipk.sh    # 指定版本号
 openwrt-ace/
 ├── build-ipk.sh              # 不依赖 OpenWrt SDK 直接产出 ipk
 ├── install.sh                # 上传 + 安装到路由器
+├── docs/                     # README 用截图与概念动画
+│   ├── screenshots/          # LuCI 真机截图、架构图
+│   └── demo/                 # 三条状态概念 GIF（Muse 生成）
 ├── engine/                   # Go 引擎（WARP 注册、端点扫描、mihomo 渲染、会话守护）
 └── files/
     ├── etc/config/ace        # uci 配置
