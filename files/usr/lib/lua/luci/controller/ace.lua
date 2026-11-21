@@ -654,8 +654,14 @@ function api_action()
 
 	-- 清日志单独处理：run.sh 用 >> 打开日志文件，截断而不删除才能保住
 	-- 同一个 inode，正在写日志的内核/看门狗不会因为文件消失而丢日志。
+	-- 三个文件都要截：api_log 显示时 /var/log/ace.log 为空会 fallback 到
+	-- /etc/ace/ace.log，只清前者的话老日志立刻"复活"。
+	-- 服务事件走 logread 环形缓冲，没有定点删除接口，改用时间水位过滤：
+	-- 记下清除时刻，api_log 读 logread -t 时丢掉水位之前的条目。
 	if action == "clearlog" then
-		sys.call(": > /var/log/ace.log; : > /var/log/ace-watchdog.log")
+		sys.call(": > /var/log/ace.log; : > /var/log/ace-watchdog.log; : > /etc/ace/ace.log")
+		local wf = io.open("/tmp/ace-log-clear-ts", "w")
+		if wf then wf:write(tostring(os.time())); wf:close() end
 		http.prepare_content("application/json")
 		http.write_json({ ok = true, action = action })
 		return
@@ -697,8 +703,29 @@ function api_log()
 	if eng and eng:gsub("%s", "") ~= "" then
 		parts[#parts + 1] = "── 引擎 ──\n" .. eng
 	end
-	local svc = sys.exec("logread -e 'ace:' 2>/dev/null | tail -n 60 | sed 's/^\\(.*\\) user\\.[a-z]* ace: /\\1 /'")
-	if svc and svc:gsub("%s", "") ~= "" then
+	-- -t 给每行加 [epoch.xxx]，据此按清除水位过滤旧服务事件。
+	-- logread 没有定点删除接口，这是唯一能"清掉"环形缓冲里 ace: 条目的办法。
+	local watermark = 0
+	local wf = io.open("/tmp/ace-log-clear-ts", "r")
+	if wf then
+		watermark = tonumber(wf:read("*l")) or 0
+		wf:close()
+	end
+	local svc_raw = sys.exec("logread -t -e 'ace:' 2>/dev/null | tail -n 200")
+	local svc_lines = {}
+	if svc_raw then
+		for line in svc_raw:gmatch("[^\n]+") do
+			local ts = line:match("%[(%d+)%.%d+%]")
+			if not ts or (tonumber(ts) or 0) >= watermark then
+				-- 去掉 -t 加的 [epoch.xxx]，并简化 logger 前缀（与原 sed 输出一致）
+				line = line:gsub("%[%d+%.%d+%]%s*", "")
+				line = line:gsub(" user%.%w+ ace: ", " ")
+				svc_lines[#svc_lines + 1] = line
+			end
+		end
+	end
+	local svc = table.concat(svc_lines, "\n")
+	if svc:gsub("%s", "") ~= "" then
 		parts[#parts + 1] = "── 服务事件 ──\n" .. svc
 	end
 
