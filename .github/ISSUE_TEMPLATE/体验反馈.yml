@@ -1,0 +1,76 @@
+name: 体验反馈
+description: 用了 ACE 之后遇到问题、或有功能建议？填这个能帮我们更快定位
+title: "[反馈] "
+labels: ["体验反馈"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢体验 ACE！填得越具体，我们越能帮上忙。
+        如果是全屋断网这类严重问题，请先把服务停掉再提 Issue，避免影响家人上网。
+
+  - type: input
+    id: device
+    attributes:
+      label: 路由器型号与架构
+      description: 例如 锐捷 BE72 PRO / aarch64_cortex-a53
+      placeholder: 型号 / 架构
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: 固件版本
+      description: ImmortalWrt / OpenWrt 及版本号
+      placeholder: 例如 ImmortalWrt 24.10
+    validations:
+      required: true
+
+  - type: input
+    id: ace_version
+    attributes:
+      label: ACE 版本
+      description: 两个 ipk 的版本号（ace / luci-app-ace）
+      placeholder: 例如 1.15.0 / 1.15.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 问题类型
+      options:
+        - 装不上 / 依赖缺失
+        - 连接失败或超时
+        - 连上了但部分网站不通
+        - 速度不符预期
+        - 界面显示异常
+        - 功能建议
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 具体现象
+      description: 做了什么、期望什么、实际发生了什么
+      placeholder: 点连接后卡在「扫描端点」…… 等了 3 分钟没反应
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 运行日志（可选）
+      description: 从 LuCI 首页「运行日志」复制，或 /var/log/ace.log 的最后几十行。注意先打码订阅链接等敏感信息
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 已确认
+      options:
+        - label: 已确认不是本地网络本身的问题（直连能上网）
+        - label: 日志里没有订阅链接、token 等敏感信息
