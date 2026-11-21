@@ -199,8 +199,11 @@
 	.ace-quality-legend { display: flex; gap: 12px; flex-wrap: wrap; }
 	.ace-quality-legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #8b8f98; }
 	.ace-quality-legend i { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+	.ace-quality-legend i.swatch { width: 12px; height: 10px; border-radius: 2px; opacity: .9; }
 	.ace-quality svg { display: block; width: 100%; height: auto; margin-top: 8px; }
 	.ace-quality-foot { margin-top: 6px; font-size: 11.5px; line-height: 1.55; color: #7b8089; }
+	.ace-quality-foot .anom { display: inline-block; margin-top: 2px; }
+	.ace-quality-foot .anom b { font-weight: 600; }
 
 	/* 流量走势（渐变面积图，见 .ace-flow-chart） */
 
@@ -1004,14 +1007,81 @@ function aceLoadQuality() {
 		document.getElementById('qualitySvg').outerHTML = svg;
 		var n = {};
 		for (var i = 0; i < d.rows.length; i++) n[d.rows[i].site] = (n[d.rows[i].site] || 0) + 1;
-		document.getElementById('qualityFoot').textContent =
+		var foot = document.getElementById('qualityFoot');
+		foot.textContent =
 			'最近 24 小时共 ' + d.rows.length + ' 个采样（' +
 			Object.keys(n).map(function (k) { return n[k] + ' 次/' + k; }).join('，') +
-			'）。采样由诊断任务每 30 分钟发一次真实请求完成，曲线越平越稳；尖峰看是只升外国线（跨境链路波动）还是连国内对照一起升（本地 ISP 拥塞）。';
+			'）。采样由诊断任务每 30 分钟发一次真实请求完成，曲线越平越稳。';
+		/* 判据：某时段均值超过自身全天基准 1.3 倍；样本 < 4 不判，避免误报 */
+		var anoms = aceAnomalyWindows(d.rows, d.at || Math.floor(Date.now() / 1000));
+		var tz = new Date().getTimezoneOffset() * 60000;
+		function hourLabel(h) {
+			var t = (d.at || Math.floor(Date.now() / 1000)) - 86400 + h * 3600;
+			return new Date(t * 1000 - tz).toTimeString().slice(0, 5);
+		}
+		if (anoms.length) {
+			var parts = anoms.map(function (a) {
+				return hourLabel(a.h0) + '–' + hourLabel(a.h1 + 1) + ' ' +
+					(a.kind === 'local' ? '<b style="color:#7fa4c9">本地拥塞</b>' : '<b style="color:#e0aa6e">跨境波动</b>');
+			});
+			var extra = document.createElement('div');
+			extra.className = 'anom';
+			extra.innerHTML = '⚠ 检出异常时段：' + parts.join('、') + '（超过全天基准 1.3 倍，仅作趋势提示）';
+			foot.appendChild(extra);
+		}
 	};
 	x.ontimeout = function () {};
 	x.onerror = function () {};
 	x.send();
+}
+
+/* 异常时段判定（纯函数，无 DOM 依赖，可 node 单测）：
+   按相对 at 的 24 个小时桶聚合，比较每桶均值与全天基准：
+   - 国内对照(baidu) > 自身全天均值×1.3 → local（本地 ISP 拥塞，灰蓝色带）
+   - 外国站 > 自身全天均值×1.3 且国内正常 → cross（跨境链路波动，橙色带）
+   - 每桶样本 < 4 不判定，避免稀疏采样误报
+   返回连续窗口 [{h0,h1,kind}]，h 是相对 at-24h 的小时序号 0..23。 */
+function aceAnomalyWindows(rows, at) {
+	var CN = 'baidu', TH = 1.3, MIN_N = 4;
+	var cnSum = 0, cnN = 0, fgSum = 0, fgN = 0, i;
+	for (i = 0; i < rows.length; i++) {
+		var r = rows[i];
+		if (typeof r.ms !== 'number' || !isFinite(r.ms) || r.ms < 0) continue;
+		if (r.site === CN) { cnSum += r.ms; cnN++; }
+		else { fgSum += r.ms; fgN++; }
+	}
+	if (cnN < MIN_N || fgN < MIN_N) return [];  /* 基准样本不足，不判 */
+	var cnBase = cnSum / cnN, fgBase = fgSum / fgN;
+	if (cnBase <= 0 || fgBase <= 0) return [];
+	var t0 = at - 86400;
+	var buckets = [];
+	for (i = 0; i < 24; i++) buckets.push({ cnSum: 0, cnN: 0, fgSum: 0, fgN: 0 });
+	for (i = 0; i < rows.length; i++) {
+		var row = rows[i];
+		if (typeof row.ms !== 'number' || !isFinite(row.ms) || row.ms < 0) continue;
+		var h = Math.floor((row.ts - t0) / 3600);
+		if (h < 0 || h > 23) continue;
+		var b = buckets[h];
+		if (row.site === CN) { b.cnSum += row.ms; b.cnN++; }
+		else { b.fgSum += row.ms; b.fgN++; }
+	}
+	var kindOf = [];
+	for (i = 0; i < 24; i++) {
+		var bk = buckets[i];
+		if (bk.cnN + bk.fgN < MIN_N) { kindOf.push(null); continue; }
+		var cnHot = bk.cnN >= 1 && (bk.cnSum / bk.cnN) > cnBase * TH;
+		var fgHot = bk.fgN >= 1 && (bk.fgSum / bk.fgN) > fgBase * TH;
+		kindOf.push(cnHot ? 'local' : (fgHot ? 'cross' : null));
+	}
+	/* 合并相邻同 kind 的小时桶为连续窗口，宽度至少 1 小时 */
+	var out = [], start = -1, cur = null;
+	for (i = 0; i <= 24; i++) {
+		var k = i < 24 ? kindOf[i] : null;
+		if (k === cur) continue;
+		if (cur !== null && start >= 0) out.push({ h0: start, h1: i - 1, kind: cur });
+		start = i; cur = k;
+	}
+	return out;
 }
 
 function aceQualitySvg(d) {
@@ -1030,6 +1100,20 @@ function aceQualitySvg(d) {
 		return s;
 	}
 	var s = '<svg id="qualitySvg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-label="24 小时网络质量曲线">';
+	/* 异常时段色带：画在最底层，覆盖整个绘图高度 */
+	var anoms = aceAnomalyWindows(d.rows, at);
+	for (i = 0; i < anoms.length; i++) {
+		var a = anoms[i];
+		var xa = +X(t0 + 3600 * a.h0), xb = +X(t0 + 3600 * (a.h1 + 1));
+		var fill = a.kind === 'local' ? 'rgba(92,138,184,.18)' : 'rgba(244,162,89,.16)';
+		var stroke = a.kind === 'local' ? 'rgba(92,138,184,.45)' : 'rgba(244,162,89,.42)';
+		s += '<rect x="' + xa + '" y="' + padT + '" width="' + (xb - xa) + '" height="' + (H - padT - padB) + '" fill="' + fill + '"/>';
+		s += '<line x1="' + xa + '" y1="' + padT + '" x2="' + xa + '" y2="' + (H - padB) + '" stroke="' + stroke + '" stroke-width="1" stroke-dasharray="3 3"/>';
+		if (i === 0) {
+			var lbl = a.kind === 'local' ? '本地拥塞' : '跨境波动';
+			s += '<text x="' + (xa + 4) + '" y="' + (padT + 9) + '" font-size="9" fill="' + (a.kind === 'local' ? '#7fa4c9' : '#e0aa6e') + '">' + lbl + '</text>';
+		}
+	}
 	/* 水平网格 + y 轴标签：取 4 格 */
 	for (i = 0; i <= 4; i++) {
 		var ms = maxMs * i / 4;
@@ -1060,9 +1144,14 @@ function aceQualitySvg(d) {
 		}
 	}
 	s += '</svg>';
-	document.getElementById('qualityLegend').innerHTML = d.sites.map(function (st) {
+	var legend = d.sites.map(function (st) {
 		return '<span><i style="background:' + st.color + '"></i>' + st.label + '</span>';
-	}).join('');
+	});
+	if (anoms.length) {
+		legend.push('<span><i class="swatch" style="background:rgba(92,138,184,.35)"></i>本地拥塞</span>');
+		legend.push('<span><i class="swatch" style="background:rgba(244,162,89,.32)"></i>跨境波动</span>');
+	}
+	document.getElementById('qualityLegend').innerHTML = legend.join('');
 	return s;
 }
 
