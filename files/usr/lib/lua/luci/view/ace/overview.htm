@@ -1014,10 +1014,10 @@ function aceLoadQuality() {
 			'）。采样由诊断任务每 30 分钟发一次真实请求完成，曲线越平越稳。';
 		/* 判据：某时段均值超过自身全天基准 1.3 倍；样本 < 4 不判，避免误报 */
 		var anoms = aceAnomalyWindows(d.rows, d.at || Math.floor(Date.now() / 1000));
-		var tz = new Date().getTimezoneOffset() * 60000;
 		function hourLabel(h) {
 			var t = (d.at || Math.floor(Date.now() / 1000)) - 86400 + h * 3600;
-			return new Date(t * 1000 - tz).toTimeString().slice(0, 5);
+			/* 与 X 轴 hhmm() 同口径：Date 已按浏览器本地时区显示，不再手动偏移 */
+			return new Date(t * 1000).toTimeString().slice(0, 5);
 		}
 		if (anoms.length) {
 			var parts = anoms.map(function (a) {
