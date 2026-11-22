@@ -1,0 +1,65 @@
+#!/bin/sh
+# ACE LED 五色呼吸：用 sys 三路(RGB)混色，红→黄→绿→蓝→紫 循环
+# 另两路独立 PWM 灯(led_red/led_green)跟随各自色系同步呼吸
+SLEEP=/usr/libexec/sleep-coreutils
+STEPS=24
+DELAY=0.05
+
+R=/sys/class/leds/led_sys_red/brightness
+G=/sys/class/leds/led_sys_green/brightness
+B=/sys/class/leds/led_sys_blue/brightness
+PR=/sys/class/leds/led_red/brightness       # 独立红灯，跟随"红系"相
+PG=/sys/class/leds/led_green/brightness     # 独立绿灯，跟随"绿系"相
+
+# 解绑所有 trigger（timer 下 brightness 由内核锁定）
+for d in /sys/class/leds/*; do
+    echo none > "$d/trigger" 2>/dev/null
+done
+
+setrgb() {
+    echo $1 > $R 2>/dev/null
+    echo $2 > $G 2>/dev/null
+    echo $3 > $B 2>/dev/null
+}
+
+# 平滑呼吸一个颜色：从全灭渐亮到目标(R,G,B)比例，再渐灭
+# $1,$2,$3=目标RGB比例  $4=独立红灯峰值  $5=独立绿灯峰值
+breathe() {
+    tr=$1; tg=$2; tb=$3; pr=$4; pg=$5
+    # 渐亮（二次曲线 ease-in）
+    i=0
+    while [ $i -le $STEPS ]; do
+        f=$(( i * i * 255 / (STEPS * STEPS) ))
+        setrgb $(( tr * f / 255 )) $(( tg * f / 255 )) $(( tb * f / 255 ))
+        echo $(( pr * f / 255 )) > $PR 2>/dev/null
+        echo $(( pg * f / 255 )) > $PG 2>/dev/null
+        i=$(( i + 1 ))
+        $SLEEP $DELAY
+    done
+    # 渐灭（二次曲线 ease-out）
+    i=$STEPS
+    while [ $i -ge 0 ]; do
+        f=$(( i * i * 255 / (STEPS * STEPS) ))
+        setrgb $(( tr * f / 255 )) $(( tg * f / 255 )) $(( tb * f / 255 ))
+        echo $(( pr * f / 255 )) > $PR 2>/dev/null
+        echo $(( pg * f / 255 )) > $PG 2>/dev/null
+        i=$(( i - 1 ))
+        $SLEEP $DELAY
+    done
+    setrgb 0 0 0
+    echo 0 > $PR 2>/dev/null
+    echo 0 > $PG 2>/dev/null
+}
+
+while true; do
+    breathe 255 0   0   255 0     # 红
+    $SLEEP 0.25
+    breathe 255 200 0   180 180   # 黄 = 红+绿
+    $SLEEP 0.25
+    breathe 0   255 0   0   255   # 绿
+    $SLEEP 0.25
+    breathe 0   0   255 0   0     # 蓝
+    $SLEEP 0.25
+    breathe 180 0   255 150 0     # 紫 = 红+蓝
+    $SLEEP 0.25
+done

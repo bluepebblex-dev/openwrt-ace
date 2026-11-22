@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+# ACE 三色呼吸灯服务
+START=97
+STOP=03
+PIDFILE=/var/run/ace-led-breath.pid
+DAEMON=/usr/bin/ace-led-breathd
+
+start() {
+    stop 2>/dev/null
+    $DAEMON >/dev/null 2>&1 &
+    echo $! > $PIDFILE
+}
+
+stop() {
+    [ -f "$PIDFILE" ] && {
+        kill "$(cat $PIDFILE)" 2>/dev/null
+        rm -f "$PIDFILE"
+    }
+    for d in /sys/class/leds/*; do
+        echo none > "$d/trigger" 2>/dev/null
+    done
+    for l in led_sys_red led_sys_green led_sys_blue led_red led_green; do
+        echo 0 > /sys/class/leds/$l/brightness 2>/dev/null
+    done
+}

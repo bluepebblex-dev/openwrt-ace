@@ -1,0 +1,106 @@
+<%+header%>
+<%
+  local jsonc = require "luci.jsonc"
+  local uci = require "luci.model.uci".cursor()
+  local features = { "_lua_force_array_" }
+  local configs = {}
+  if luci.sys.call("which ota >/dev/null 2>&1 && ota >/dev/null 2>&1") == 0 then
+      features[#features+1] = "ota"
+  end
+  if luci.sys.call("[ -d /ext_overlay ] >/dev/null 2>&1") == 0 then
+      features[#features+1] = "sandbox"
+  end
+  if luci.sys.call("[ -e /etc/init.d/dockerd ] >/dev/null 2>&1") == 0 then
+      features[#features+1] = "dockerd"
+  end
+  if luci.sys.call("[ -e /etc/init.d/unishare ] >/dev/null 2>&1") == 0 then
+      features[#features+1] = "unishare"
+  end
+  if luci.sys.call("/etc/init.d/ttyd running >/dev/null 2>&1") == 0 then
+      features[#features+1] = "ttyd"
+      local port = uci:get_first("ttyd", "ttyd", "port") or "7681"
+      local ssl  = uci:get_first("ttyd", "ttyd", "ssl") or "0"
+      configs["ttyd"] = {
+        port = tonumber(port),
+        ssl = ssl == "1"
+      }
+  end
+  if uci:get("quickstart", "main", "disable_update_check") == "1" then
+      configs["update"] = {
+        disable = true
+      }
+  end
+-%>
+<script>
+    (function(){
+      window.token = "<%=token%>";
+      window.aceSid = "<%=luci.dispatcher.context.authsession or ""%>";
+      var vue_prefix="<%=prefix%>";
+      window.vue_base = vue_prefix + '/';
+      window.vue_lang_data = '/luci-static/quickstart/i18n/<%=lang%>.json?v=0.12.10-r1';
+      window.vue_lang = '<%=lang%>';
+      window.quickstart_features = <%=jsonc.stringify(features)%>;
+      window.quickstart_configs = <%=jsonc.stringify(configs)%>;
+      if (location.pathname != vue_prefix && !location.pathname.startsWith(window.vue_base)) {
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState({}, null, vue_prefix);
+        } else {
+          location.href = vue_prefix;
+        }
+      }
+    })();
+</script>
+<div id="app">
+</div>
+
+<!-- ACE LED 氛围灯开关：独立浮层，不依赖 Vue -->
+<div id="ace-led-toggle" style="position:fixed;top:10px;right:150px;z-index:9999;display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.5);border-radius:20px;padding:5px 11px;cursor:pointer;user-select:none;font-family:inherit">
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2.5c0 4 1.5 5.5 5.5 5.5-4 0-5.5 1.5-5.5 5.5 0-4-1.5-5.5-5.5-5.5C10.5 8 12 6.5 12 2.5z" fill="#fff"/><circle cx="18.5" cy="17" r="2" fill="#fff"/><circle cx="6" cy="18" r="1.4" fill="#fff"/></svg>
+  <span style="color:#fff;font-size:13px;font-weight:500">氛围灯</span>
+  <span id="ace-led-track" style="width:38px;height:20px;border-radius:10px;background:rgba(255,255,255,.45);position:relative;transition:background .2s">
+    <span id="ace-led-thumb" style="width:16px;height:16px;border-radius:50%;background:#fff;position:absolute;top:2px;left:2px;transition:left .2s"></span>
+  </span>
+</div>
+<script>
+(function(){
+  var API = '/cgi-bin/luci/admin/services/ace/api/led';
+  var track = document.getElementById('ace-led-track');
+  var thumb = document.getElementById('ace-led-thumb');
+  var box = document.getElementById('ace-led-toggle');
+  var on = false;
+
+  function render(){
+    track.style.background = on ? '#fff' : 'rgba(255,255,255,.45)';
+    thumb.style.left = on ? '20px' : '2px';
+  }
+  function flip(){
+    var next = !on;
+    var body = 'action=' + (next ? 'on' : 'off') + '&token=' + encodeURIComponent(window.token || window.aceSid || '');
+    fetch(API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body,
+      credentials: 'same-origin'
+    }).then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function(j){
+        if (j && j.ok) {
+          on = next;
+          try { localStorage.setItem('ace_led_on', on ? '1' : '0'); } catch(e) {}
+          render();
+        }
+      }).catch(function(){});
+  }
+
+  box.addEventListener('click', flip);
+  try { on = localStorage.getItem('ace_led_on') === '1'; } catch(e) {}
+  render();
+  fetch(API + '?action=status', { credentials: 'same-origin' })
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(j){ if (j && j.ok) { on = !!j.on; try { localStorage.setItem('ace_led_on', on?'1':'0'); } catch(e) {} render(); } })
+    .catch(function(){});
+})();
+</script>
+
+<script type="module" crossorigin src="/luci-static/quickstart/index.js?v=0.12.10-ace1"></script>
+<link rel="stylesheet" href="/luci-static/quickstart/style.css?v=0.12.10-ace1">
+<%+footer%>
