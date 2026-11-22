@@ -131,12 +131,16 @@
 			<div class="ctl">
 				<input type="checkbox" class="ace-toggle" id="f-openvpn">
 				<span class="ace-core-stat" id="ovpnStat" style="display:none"></span>
+				<button class="btn cbi-button" id="vpnBtn" onclick="aceVpnRefresh()">刷新节点</button>
+				<span class="ace-core-stat" id="vpnStat" style="display:none"></span>
 			</div>
 			<p class="sub">
 				在 WARP 之上再套一层 VPN Gate 公共节点（mihomo 的 openvpn 出站，仅 IPv4），
 				出口国家可控，代价是速度下降。<b>首次连接要 1–3 分钟</b>：节点列表要从
 				VPN Gate 拉取，再逐个试连。<br>
 				<span id="ovpnWarn" style="display:none;color:#d29922"></span>
+				节点列表会过期；点「刷新节点」可手动重拉（约 5–30 秒，不影响当前连接）。<br>
+				<span id="vpnLog" style="display:none;color:#8a8a8a;font-size:11px"></span>
 			</p>
 		</div>
 
@@ -253,6 +257,7 @@ var ACE_SAVE = '<%=url("admin/services/ace/api/save")%>';
 var ACE_STATUS = '<%=url("admin/services/ace/api/status")%>';
 var ACE_CORE = '<%=url("admin/services/ace/api/core")%>';
 var ACE_GEO = '<%=url("admin/services/ace/api/geo")%>';
+var ACE_VPN = '<%=url("admin/services/ace/api/vpn")%>';
 var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var ACE_FLAGS = ['tun', 'openvpn', 'ipv6', 'dns_takeover', 'dns_leak', 'lan_watchdog', 'enabled'];
 var ACE_SAW_INSTALL = false; /* 本次页面里见过下载标记，用于结束时提示「已更新」 */
@@ -638,11 +643,113 @@ function aceUpdateGeo() {
 	x.send('action=update&token=' + encodeURIComponent(ACE_TOKEN));
 }
 
+/* ---------------------------------------------------------------- VPN Gate 节点
+   刷新只更新节点缓存，不动连接，所以不需要像内核那样重启服务。
+   引擎把结果压成一行 JSON（count/countries/at），这里读它显示节点数。 */
+var ACE_SAW_VPN = false;
+
+function aceVpnAgo(sec) {
+	sec = Math.max(0, Math.floor(sec));
+	if (sec < 60) return sec + ' 秒前';
+	if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前';
+	if (sec < 86400) return Math.floor(sec / 3600) + ' 小时前';
+	return Math.floor(sec / 86400) + ' 天前';
+}
+
+function aceVpnRender(d) {
+	var btn = document.getElementById('vpnBtn');
+	var stat = document.getElementById('vpnStat');
+	var log = document.getElementById('vpnLog');
+	if (!btn || !stat) return false;
+
+	if (d.refreshing) {
+		stat.className = 'ace-core-stat busy';
+		stat.textContent = '正在刷新…';
+		stat.title = d.log || '';
+		btn.disabled = true;
+		log.style.display = '';
+		log.textContent = d.log || '正在获取 VPN Gate 节点…';
+		return true;
+	}
+	btn.disabled = false;
+	log.style.display = 'none';
+
+	var r = d.result;
+	if (r && r.ok && r.count > 0) {
+		stat.className = 'ace-core-stat ok';
+		stat.textContent = r.count + ' 节点 · ' + (r.countries || 0) + ' 国';
+		stat.title = '节点列表更新于 ' + aceVpnAgo((Date.now() / 1000) - (r.at || 0))
+			+ (d.cache_mtime ? '（缓存文件 ' + aceVpnAgo((Date.now() / 1000) - d.cache_mtime) + '）' : '');
+	} else if (r && r.ok === false) {
+		stat.className = 'ace-core-stat bad';
+		stat.textContent = '刷新失败';
+		stat.title = d.log || 'VPN Gate 拉取失败，缓存未改动';
+	} else if (d.cache_exists) {
+		/* 引擎刷新前就有缓存，只是本界面没存过结果 JSON */
+		stat.className = 'ace-core-stat ok';
+		stat.textContent = '已有缓存';
+		stat.title = '缓存文件更新于 ' + aceVpnAgo((Date.now() / 1000) - (d.cache_mtime || 0)) + '；点「刷新节点」重拉';
+	} else {
+		stat.className = 'ace-core-stat bad';
+		stat.textContent = '无缓存';
+		stat.title = '首次连接时引擎会自动拉取；也可点「刷新节点」';
+	}
+	return false;
+}
+
+function aceVpnPoll(times) {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_VPN + '?t=' + Date.now(), true);
+	x.onload = function () {
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) { return; }
+		var busy = aceVpnRender(d);
+		if (busy) {
+			ACE_SAW_VPN = true;
+		} else if (ACE_SAW_VPN) {
+			ACE_SAW_VPN = false;
+			aceMsg(d.result && d.result.ok ? '节点列表已更新' : '节点刷新失败，详情见状态提示',
+				d.result && d.result.ok ? 'ok' : 'err');
+		}
+		if (busy && (times || 0) < 120) {
+			setTimeout(function () { aceVpnPoll((times || 0) + 1); }, 2500);
+		}
+	};
+	x.send();
+}
+
+function aceVpnRefresh() {
+	var btn = document.getElementById('vpnBtn');
+	btn.disabled = true;
+	var stat = document.getElementById('vpnStat');
+	stat.className = 'ace-core-stat busy';
+	stat.textContent = '正在启动…';
+	var x = new XMLHttpRequest();
+	x.open('POST', ACE_VPN, true);
+	x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+	x.onload = function () {
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) {}
+		if (x.status !== 200 || !d || !d.ok) {
+			aceMsg('启动刷新失败（HTTP ' + x.status + '）', 'err');
+			btn.disabled = false;
+			return;
+		}
+		aceVpnPoll(0);
+	};
+	x.onerror = function () {
+		aceMsg('启动刷新失败（网络错误）', 'err');
+		btn.disabled = false;
+	};
+	x.send('action=refresh&token=' + encodeURIComponent(ACE_TOKEN));
+}
+
 document.getElementById('f-openvpn').addEventListener('change', aceOvpnHint);
 
 aceLoad();
 aceCorePoll(0);
 aceGeoPoll(0);
+aceVpnPoll(0);
 </script>
 
 <%+footer%>

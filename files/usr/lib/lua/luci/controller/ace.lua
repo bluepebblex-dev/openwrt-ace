@@ -39,6 +39,7 @@ function index()
 	entry({"admin", "services", "ace", "api", "save"}, call("api_save")).leaf = true
 	entry({"admin", "services", "ace", "api", "core"}, call("api_core")).leaf = true
 	entry({"admin", "services", "ace", "api", "geo"}, call("api_geo")).leaf = true
+	entry({"admin", "services", "ace", "api", "vpn"}, call("api_vpn")).leaf = true
 	entry({"admin", "services", "ace", "api", "led"}, call("api_led")).leaf = true
 end
 
@@ -151,6 +152,13 @@ local CORE_LOG = "/var/log/ace-core.log"
 -- 会自动补下；这里只负责把现状报给界面、接「手动更新」按钮。
 local GEO_FLAG = "/var/run/ace-geo-installing"
 local GEO_LOG = "/var/log/ace-geo.log"
+-- VPN Gate 节点缓存：设置页「刷新节点」按钮走引擎的 vpn-refresh 子命令，
+-- 只重写 /etc/ace/vpngate-nodes-v2.json，不碰连接。1MB 的缓存不适合轮询解析，
+-- 引擎刷新完把一行精简 JSON（count/countries/at）落到 VPN_STAT，界面只读它。
+local VPN_FLAG = "/var/run/ace-vpn-refreshing"
+local VPN_LOG = "/var/log/ace-vpn-refresh.log"
+local VPN_STAT = "/var/run/ace-vpn-stat.json"
+local VPN_CACHE = "/etc/ace/vpngate-nodes-v2.json"
 -- probe 结果按 (path, size, mtime) 缓存：一次 probe 要跑八次 mihomo -t（约 3 秒），
 -- 而 api_status 每 2.5 秒被轮询一次，不缓存等于把 CPU 钉在配置解析上。
 local PROBE_CACHE = "/var/run/ace-probe.json"
@@ -1070,6 +1078,53 @@ function api_geo()
 
 	http.prepare_content("application/json")
 	http.write_json({ ok = true, installing = true })
+end
+
+-- ---------------------------------------------------------------- VPN Gate 节点
+-- 引擎的 vpn-refresh 只重写 /etc/ace/vpngate-nodes-v2.json（节点列表），不碰
+-- 连接/路由/DNS，所以刷新可以和服务并行、不中断隧道。抓 95 个节点约 5 秒。
+-- 1MB 的缓存不适合每次轮询解析：引擎把结果压成一行 JSON 落到 VPN_STAT，
+-- 界面只读这个几百字节的小文件。缓存本身的时间用 stat 拿（不用解析内容）。
+function api_vpn()
+	local action = http.formvalue("action") or "status"
+
+	if action == "refresh" then
+		if not csrf_ok() then
+			return csrf_deny()
+		end
+		if fs.access(VPN_FLAG) then
+			http.prepare_content("application/json")
+			http.write_json({ ok = true, refreshing = true })
+			return
+		end
+		-- stdout = 一行结果 JSON（ok/count/countries/at），stderr = 阶段日志
+		fs.writefile(VPN_FLAG, "1\n")
+		sys.call(": > " .. VPN_LOG .. "; ( WARP_CLIENT_HOME=/etc/ace /usr/bin/ace-engine vpn-refresh >" ..
+			VPN_STAT .. " 2>>" .. VPN_LOG .. "; rm -f " .. VPN_FLAG .. " ) >/dev/null 2>&1 &")
+		http.prepare_content("application/json")
+		http.write_json({ ok = true, refreshing = true })
+		return
+	end
+
+	-- status（只读）：刷新中看 flag；完成后看结果 JSON；缓存时间看 stat。
+	local refreshing = fs.access(VPN_FLAG) and true or false
+	local result = nil
+	local cached = fs.readfile(VPN_STAT)
+	if cached and cached:gsub("%s", "") ~= "" then
+		local ok, data = pcall(function() return require("luci.jsonc").parse(cached) end)
+		if ok and type(data) == "table" then result = data end
+	end
+	local st = fs.stat(VPN_CACHE)
+	local logtail = (sys.exec("tail -n 3 " .. VPN_LOG .. " 2>/dev/null") or ""):gsub("%s+$", "")
+	http.prepare_content("application/json")
+	http.write_json({
+		ok = true,
+		refreshing = refreshing,
+		result = result,                       -- {ok,count,countries,at} 或 null
+		cache_mtime = st and tonumber(st.mtime) or nil,
+		cache_exists = st and true or false,
+		log = logtail,
+	})
 end
 -- ---------------------------------------------------------------- LED 氛围灯
 -- 首页顶栏的开关：status 只读(GET)，on/off 写(POST + CSRF)。

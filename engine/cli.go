@@ -267,6 +267,12 @@ func main() {
 		// button shells out to this; hidden like `core`.
 		os.Exit(runGeoInstall(os.Args[2:]))
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "vpn-refresh" {
+		// Internal: force-refresh the VPN Gate node cache. LuCI's "刷新节点"
+		// button shells out to this; hidden like `core`/`geo`. Only touches the
+		// node cache file, never the live connection.
+		os.Exit(runVPNRefresh(os.Args[2:]))
+	}
 	switch os.Args[1] {
 	case "-h", "-help", "--help", "help":
 		rootUsage(os.Stdout)
