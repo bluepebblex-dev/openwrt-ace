@@ -17,7 +17,7 @@
 
 </div>
 
-![ACE 首页：连接状态、实时速率与运行日志](docs/screenshots/luci-overview.png)
+![ACE 首页：连接状态、24h 质量曲线与出口信息](docs/screenshots/luci-overview.png)
 
 ## 为什么是 ACE
 
