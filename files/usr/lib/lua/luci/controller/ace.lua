@@ -38,6 +38,7 @@ function index()
 	entry({"admin", "services", "ace", "api", "save"}, call("api_save")).leaf = true
 	entry({"admin", "services", "ace", "api", "core"}, call("api_core")).leaf = true
 	entry({"admin", "services", "ace", "api", "geo"}, call("api_geo")).leaf = true
+	entry({"admin", "services", "ace", "api", "led"}, call("api_led")).leaf = true
 end
 
 -- ---------------------------------------------------------------- CSRF
@@ -1011,4 +1012,38 @@ function api_geo()
 
 	http.prepare_content("application/json")
 	http.write_json({ ok = true, installing = true })
+end
+-- ---------------------------------------------------------------- LED 氛围灯
+-- 首页顶栏的开关：status 只读(GET)，on/off 写(POST + CSRF)。
+-- 只控制 /etc/init.d/ace-led-breath（纯灯光服务），不碰网络/TUN/隧道。
+local LED_INIT = "/etc/init.d/ace-led-breath"
+
+function api_led()
+	local action = http.formvalue("action") or "status"
+
+	if action == "status" then
+		local on = fs.access("/var/run/ace-led-breath.pid") and true or false
+		http.prepare_content("application/json")
+		http.write_json({ ok = true, on = on })
+		return
+	end
+
+	if not csrf_ok() then
+		return csrf_deny()
+	end
+
+	if action ~= "on" and action ~= "off" then
+		http.status(400, "Bad Request")
+		http.prepare_content("application/json")
+		http.write_json({ ok = false, error = "unknown action" })
+		return
+	end
+
+	if action == "on" then
+		sys.call(LED_INIT .. " enable >/dev/null 2>&1; " .. LED_INIT .. " start >/dev/null 2>&1")
+	else
+		sys.call(LED_INIT .. " stop >/dev/null 2>&1; " .. LED_INIT .. " disable >/dev/null 2>&1")
+	end
+	http.prepare_content("application/json")
+	http.write_json({ ok = true, on = (action == "on") })
 end
