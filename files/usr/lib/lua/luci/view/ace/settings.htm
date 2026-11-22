@@ -6,8 +6,15 @@
 		background: rgba(127,127,127,.07); border: 1px solid rgba(127,127,127,.16);
 		border-radius: 14px; padding: 16px 18px; margin-top: 14px;
 	}
-	.ace-card h3 { margin: 0 0 4px; font-size: 14px; }
-	.ace-card .hint { font-size: 11.5px; opacity: .62; margin: 0 0 12px; line-height: 1.6; }
+	.ace-card h3 { margin: 0 0 4px; font-size: 14px; display: flex; align-items: center; gap: 9px; }
+	/* 分区图标：同一枚橙色描边，跟首页的橙主题一致；不占额外一行 */
+	.ace-sec-ico {
+		width: 26px; height: 26px; border-radius: 7px; flex: 0 0 auto;
+		background: rgba(234, 88, 12, .12);
+		display: inline-flex; align-items: center; justify-content: center;
+	}
+	.ace-sec-ico svg { width: 15px; height: 15px; stroke: #ea580c; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+	.ace-card .hint { font-size: 11.5px; opacity: .62; margin: 0 0 12px 35px; line-height: 1.6; }
 	.ace-row {
 		display: flex; align-items: center; gap: 14px; padding: 10px 0;
 		border-top: 1px solid rgba(127,127,127,.13); flex-wrap: wrap;
@@ -17,15 +24,30 @@
 	/* 内核行的绿框要紧跟标签，标签宽度按内容伸缩，避免长版本号挤到输入框上 */
 	#coreRow .lbl { flex: 0 0 auto; min-width: 190px; display: flex; align-items: center; gap: 8px; }
 	.ace-row .ctl { flex: 1 1 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-	.ace-row .sub { flex: 1 1 100%; font-size: 11.5px; opacity: .6; margin: 4px 0 0; line-height: 1.55; }
+	.ace-row .sub { flex: 1 1 100%; font-size: 11.5px; opacity: .6; margin: 4px 0 0 204px; line-height: 1.55; }
+	#coreRow .sub, #geoRow .sub, #ovpnRow .sub { margin-left: 0; }
 	.ace-row input[type=text], .ace-row select { min-width: 220px; }
-	.ace-core-stat {
-		font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
-		border: 1px solid rgba(128, 128, 128, .4); opacity: .8; white-space: nowrap;
+	/* 高风险开关的红色小标：跟普通项一眼分开，不靠颜色记忆 */
+	.ace-risk {
+		display: inline-block; font-size: 11px; line-height: 1.4; padding: 1px 7px;
+		border-radius: 999px; margin-left: 7px; vertical-align: 1px;
+		background: rgba(179, 38, 30, .13); color: #c4403a; font-weight: 500;
 	}
-	.ace-core-stat.ok { border-color: #2ea043; color: #2ea043; opacity: 1; }
-	.ace-core-stat.bad { border-color: #d29922; color: #d29922; opacity: 1; }
-	.ace-core-stat.busy { border-color: #58a6ff; color: #58a6ff; opacity: 1; }
+	.ace-info {
+		display: inline-flex; width: 14px; height: 14px; border-radius: 50%;
+		border: 1px solid rgba(127,127,127,.45); color: rgba(127,127,127,.9);
+		font-size: 11px; line-height: 1; align-items: center; justify-content: center;
+		margin-left: 6px; vertical-align: 1px; cursor: help;
+	}
+	.ace-core-stat {
+		font-size: 11.5px; padding: 2px 9px; border-radius: 999px;
+		border: 1px solid rgba(128, 128, 128, .4); opacity: .85; white-space: nowrap;
+	}
+	.ace-core-stat.ok { border-color: rgba(46,160,67,.55); background: rgba(46,160,67,.12); color: #2ea043; opacity: 1; }
+	.ace-core-stat.bad { border-color: rgba(210,153,34,.55); background: rgba(210,153,34,.12); color: #d29922; opacity: 1; }
+	.ace-core-stat.busy { border-color: rgba(88,166,255,.55); background: rgba(88,166,255,.12); color: #58a6ff; opacity: 1; }
+	/* OpenVPN 内核不支持是明确的「不可用」，比「警告」更重，单独用红 */
+	#ovpnStat.bad { border-color: rgba(226,75,74,.6); background: rgba(226,75,74,.12); color: #d9483f; }
 	/* 有新内核时按钮右上角一枚小点：不占位、不改文案，扫一眼就知道该点它 */
 	#coreBtn { position: relative; }
 	#coreBtn.has-upd::after {
@@ -48,7 +70,25 @@
 	.ace-geo-item.missing .v { opacity: .9; }
 	/* 下载中：蓝色描边 + 实时字节，下载完成后原样落回正常胶囊 */
 	.ace-geo-item.downloading { border-color: rgba(88,166,255,.55); color: #58a6ff; }
-	.ace-toggle { width: 18px; height: 18px; accent-color: #2f7d4f; }
+	/* 拨动开关：只换外观，元素仍是原生 checkbox，aceFill/aceSave 的 checked 逻辑不变。
+	   Ruijie 主题对 input 有强规则，这里必须 !important 才能压过它。 */
+	input.ace-toggle[type="checkbox"] {
+		-webkit-appearance: none !important; appearance: none !important;
+		position: relative !important; width: 38px !important; height: 21px !important;
+		flex: 0 0 auto; border-radius: 999px !important;
+		background: rgba(127,127,127,.32) !important;
+		border: 1px solid rgba(127,127,127,.35) !important; cursor: pointer; margin: 0 !important;
+		transition: background .18s, border-color .18s;
+	}
+	input.ace-toggle[type="checkbox"]::after {
+		content: '' !important; position: absolute !important; top: 2px !important; left: 2px !important;
+		width: 15px !important; height: 15px !important; border-radius: 50% !important;
+		background: #fff !important; box-shadow: 0 1px 3px rgba(0,0,0,.28);
+		transition: transform .18s;
+	}
+	input.ace-toggle[type="checkbox"]:checked { background: #ea580c !important; border-color: #ea580c !important; }
+	input.ace-toggle[type="checkbox"]:checked::after { transform: translateX(17px) !important; }
+	input.ace-toggle[type="checkbox"]:focus-visible { outline: 2px solid #ea580c; outline-offset: 2px; }
 	.ace-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
 	.ace-msg { font-size: 12.5px; }
 	.ace-msg.ok { color: #2f7d4f; }
@@ -63,11 +103,11 @@
 	</div>
 
 	<div class="ace-card">
-		<h3>连接</h3>
+		<h3><span class="ace-sec-ico"><svg viewBox="0 0 24 24"><path d="M4 12h15M14 6l6 6-6 6"/></svg></span>连接</h3>
 		<p class="hint">决定这次连接怎么走，保存后立即生效。</p>
 
 		<div class="ace-row">
-			<div class="lbl">TUN 接管整屋流量</div>
+			<div class="lbl">TUN 接管整屋流量<span class="ace-risk">高风险</span></div>
 			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-tun"></div>
 			<p class="sub">关闭时只在路由器本机开一个混合代理端口（可用 curl -x 验证通路），局域网完全不受影响。建议第一次先关掉确认引擎能连上，再打开接管整屋。</p>
 		</div>
@@ -119,23 +159,23 @@
 	</div>
 
 	<div class="ace-card">
-		<h3>DNS 与转发</h3>
+		<h3><span class="ace-sec-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18"/></svg></span>DNS 与转发</h3>
 		<p class="hint">三项都只在 TUN 开启时生效。</p>
 
 		<div class="ace-row">
-			<div class="lbl">接管局域网 DNS</div>
+			<div class="lbl">接管局域网 DNS<span class="ace-risk">高风险</span></div>
 			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-dns_takeover"></div>
 			<p class="sub">把 dnsmasq 的上游指向内核解析器，避免 DNS 泄漏与污染。断开时自动还原。</p>
 		</div>
 
 		<div class="ace-row">
-			<div class="lbl">解析走隧道</div>
+			<div class="lbl">解析走隧道<span class="ace-info" title="关闭时内核从 WAN 直查明文上游，被墙域名会拿到污染 IP（如 google 解析到不相干地址），流量走隧道也打不开。">i</span></div>
 			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-dns_leak"></div>
 			<p class="sub">内核解析器的查询跟随规则经隧道发出（respect-rules）。关闭时内核从 WAN 直查明文上游，被墙域名会拿到污染结果（如 youtube / google 解析到不相干 IP），流量走隧道也无法打开。</p>
 		</div>
 
 		<div class="ace-row">
-			<div class="lbl">LAN 失联自愈</div>
+			<div class="lbl">LAN 失联自愈<span class="ace-risk">高风险</span></div>
 			<div class="ctl"><input type="checkbox" class="ace-toggle" id="f-lan_watchdog"></div>
 			<p class="sub">TUN 起来后若 br-lan 载波丢失（真机上出现过一次必须断电才能恢复的情况），连续三次读不到载波就自动重启，不必去拔电源。</p>
 		</div>
@@ -153,7 +193,7 @@
 	</div>
 
 	<div class="ace-card">
-		<h3>高级</h3>
+		<h3><span class="ace-sec-ico"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2.2"/><circle cx="15" cy="17" r="2.2"/></svg></span>高级</h3>
 		<p class="hint">一般不用改。</p>
 
 		<div class="ace-row">
