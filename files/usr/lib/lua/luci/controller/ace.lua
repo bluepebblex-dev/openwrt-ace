@@ -32,6 +32,7 @@ function index()
 	entry({"admin", "services", "ace", "api", "probe"}, call("api_probe")).leaf = true
 	entry({"admin", "services", "ace", "api", "quality"}, call("api_quality")).leaf = true
 	entry({"admin", "services", "ace", "api", "mem"}, call("api_mem")).leaf = true
+	entry({"admin", "services", "ace", "api", "health"}, call("api_health")).leaf = true
 	entry({"admin", "services", "ace", "api", "action"}, call("api_action")).leaf = true
 	entry({"admin", "services", "ace", "api", "log"}, call("api_log")).leaf = true
 	entry({"admin", "services", "ace", "api", "settings"}, call("api_settings")).leaf = true
@@ -724,6 +725,63 @@ function api_mem()
 		series = ace_mem_series(),
 		at = os.time()
 	})
+end
+
+-- 出口健康探测：只读。经 mihomo 的 mixed-port 请求一个小响应（gstatic 204），
+-- 用真实数据面往返时间判断出口是不是「连着但走不动」。这是 api_status 里
+-- latency_ms 给不了的信号 —— 那个是建链时测的端点 ping，是死值。
+-- 缓存 20 秒到 /var/run，避免前端 2.5s 轮询把外网请求打爆；未连接不探测。
+local HEALTH_CACHE = "/var/run/ace-health.json"
+local HEALTH_TTL = 20
+local function ace_health()
+	local st = read_state() or {}
+	local running = st.connected and pid_alive(st.core_pid)
+	if not running then
+		return { state = "idle", level = "idle", ms = 0, at = os.time() }
+	end
+
+	local now = os.time()
+	local cached = fs.readfile(HEALTH_CACHE)
+	if cached then
+		local ok, data = pcall(function() return require("luci.jsonc").parse(cached) end)
+		if ok and type(data) == "table" and data.at and (now - tonumber(data.at)) < HEALTH_TTL then
+			return data
+		end
+	end
+
+	-- mixed_port / api_port 都可在设置页改，必须读实际值，不能写死 7890。
+	local aport = cursor():get("ace", "main", "api_port") or "9090"
+	local mport = cursor():get("ace", "main", "mixed_port") or "7890"
+	-- %{http_code} 204 说明真从出口拿到了响应；time_total 是含握手的完整往返。
+	local probe = sys.exec("curl -x http://127.0.0.1:" .. mport .. " -m 12 -sS -o /dev/null "
+		.. "-w '%{http_code} %{time_total}' https://www.gstatic.com/generate_204 2>/dev/null")
+	local code, secs = tostring(probe or ""):match("^(%d+)%s+([%d%.]+)")
+	local ms = 0
+	local level, state
+	if code == "204" and secs then
+		ms = math.floor(tonumber(secs) * 1000 + 0.5)
+		-- 真机基线：通畅 1.1–2.3s；故障时 5–6s 或直接超时。
+		-- 3.5s 起判拥塞，避开正常抖动误报；5s 起判无响应。
+		if ms >= 5000 then
+			level, state = "bad", "出口无响应"
+		elseif ms >= 3500 then
+			level, state = "warn", "出口拥塞"
+		else
+			level, state = "ok", "出口通畅"
+		end
+	else
+		-- 探测失败：可能是外网抖动，也可能是隧道真断了，一律按最坏显示。
+		level, state = "bad", "出口无响应"
+	end
+
+	local out = { state = state, level = level, ms = ms, at = now }
+	fs.writefile(HEALTH_CACHE, require("luci.jsonc").stringify(out))
+	return out
+end
+
+function api_health()
+	http.prepare_content("application/json")
+	http.write_json(ace_health())
 end
 
 function api_action()

@@ -78,6 +78,9 @@
 	.ace-dialstate .line { display: flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 650; letter-spacing: .3px; }
 	.ace-dialstate .dot { width: 9px; height: 9px; border-radius: 50%; background: #5a5f68; transition: .3s; }
 	.ace-dialstate.on .dot { background: #3ddc84; box-shadow: 0 0 0 4px rgba(61,220,132,.13), 0 0 12px rgba(61,220,132,.7); }
+	/* 出口不健康：连接态的绿灯改橙/红，并保持呼吸提示"还连着但走不动" */
+	.ace-dialstate.warn .dot { background: #ff9838; box-shadow: 0 0 0 4px rgba(255,152,56,.13), 0 0 12px rgba(255,152,56,.7); animation: acepulse 1.6s ease-in-out infinite; }
+	.ace-dialstate.bad .dot { background: #e24b4a; box-shadow: 0 0 0 4px rgba(226,75,74,.15), 0 0 12px rgba(226,75,74,.75); animation: acepulse 1s ease-in-out infinite; }
 	.ace-dialstate.busy .dot { background: #ff9838; box-shadow: 0 0 0 4px rgba(255,152,56,.13), 0 0 12px rgba(255,152,56,.6); animation: acepulse 1.1s ease-in-out infinite; }
 	@keyframes acepulse { 50% { opacity: .35; } }
 	.ace-dialstate .sub { font-size: 12px; color: #8b8f98; display: flex; align-items: center; gap: 7px; min-height: 17px; }
@@ -430,6 +433,7 @@ var ACE_DIAG = '<%=url("admin/services/ace/api/diagnose")%>';
 var ACE_PROBE = '<%=url("admin/services/ace/api/probe")%>';
 var ACE_QUALITY = '<%=url("admin/services/ace/api/quality")%>';
 var ACE_MEM = '<%=url("admin/services/ace/api/mem")%>';
+var ACE_HEALTH = '<%=url("admin/services/ace/api/health")%>';
 var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var aceBusy = false;
 var aceLast = null;   /* 上一次 status（流量速率用总量差算） */
@@ -497,6 +501,9 @@ var ACE_GLOBE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" str
 
 var RING_N = 68;
 var RING_OFF = [255, 152, 56], RING_ON = [61, 220, 132];
+/* 出口健康色：绿=通畅、橙=拥塞、红=无响应。默认绿，探测后按结果切换。 */
+var RING_WARN = [255, 152, 56], RING_BAD = [226, 75, 74];
+var healthLevel = 'ok', healthState = '出口通畅', healthMs = 0;
 var ringCanvas = document.getElementById('dialRing');
 var ringCtx = ringCanvas ? ringCanvas.getContext('2d') : null;
 var ringLit = null, ringState = 'off', ringSwing = 0;
@@ -550,7 +557,9 @@ function ringDraw(ts) {
 	if (busy) ringSwing = (ringSwing + (ringState === 'connecting' ? 0.011 : 0.016)) % (Math.PI * 2);
 
 	var outer = ringR - 2, inner = ringR - 17;
-	var col = on ? RING_ON : RING_OFF;
+	/* 连接态按出口健康换色：拥塞橙、无响应红，通畅维持绿。 */
+	var ringOnColor = healthLevel === 'bad' ? RING_BAD : (healthLevel === 'warn' ? RING_WARN : RING_ON);
+	var col = on ? ringOnColor : RING_OFF;
 
 	for (var i = 0; i < RING_N; i++) {
 		var ang = RING_ANG[i];
@@ -605,11 +614,11 @@ function ringDraw(ts) {
 		var b = 0.55 + 0.45 * Math.sin(t * 1.5);
 		ringCtx.save();
 		ringCtx.globalCompositeOperation = 'lighter';
-		ringCtx.strokeStyle = ringRgba(RING_ON, 0.16 + b * 0.12);
+		ringCtx.strokeStyle = ringRgba(ringOnColor, 0.16 + b * 0.12);
 		ringCtx.lineWidth = 8;
 		ringCtx.beginPath(); ringCtx.arc(ringCX, ringCY, rr, 0, Math.PI * 2); ringCtx.stroke();
 		ringCtx.restore();
-		ringCtx.strokeStyle = ringRgba(RING_ON, 0.78);
+		ringCtx.strokeStyle = ringRgba(ringOnColor, 0.78);
 		ringCtx.lineWidth = 1.7;
 		ringCtx.beginPath(); ringCtx.arc(ringCX, ringCY, rr, 0, Math.PI * 2); ringCtx.stroke();
 	} else if (busy) {
@@ -659,7 +668,13 @@ function aceDialClock() {
 	if (!el) return;
 	var s = Math.max(0, Math.floor((Date.now() - aceUpSince) / 1000));
 	var p = function (n) { return (n < 10 ? '0' : '') + n; };
-	el.innerHTML = '<span class="ip">' + ACE_GLOBE + (aceExitIp || '等待出口') + '</span>'
+	/* 出口拥塞/无响应时，用状态色把原因写在秒表前面，别再假装一切正常 */
+	var warn = '';
+	if (healthLevel === 'warn' || healthLevel === 'bad') {
+		warn = '<span style="color:' + (healthLevel === 'bad' ? '#e24b4a' : '#ff9838') + '">'
+			+ healthState + (healthMs ? ' ' + healthMs + 'ms' : '') + '</span><span class="sep">·</span>';
+	}
+	el.innerHTML = warn + '<span class="ip">' + ACE_GLOBE + (aceExitIp || '等待出口') + '</span>'
 		+ '<span class="sep">·</span><span>' + p(Math.floor(s / 3600)) + ':' + p(Math.floor(s / 60) % 60) + ':' + p(s % 60) + '</span>';
 }
 setInterval(aceDialClock, 1000);
@@ -682,6 +697,8 @@ function aceDialState(st, d) {
 		document.getElementById('knobIcon').innerHTML = ACE_ICON_POWER;
 		document.getElementById('knobText').textContent = '断开';
 		tx.textContent = '已连接';
+		/* 每次轮询重设基础态，健康叠加由 aceHealthRender 紧随其后重新贴上去 */
+		aceHealthRender();
 		aceExitIp = (d && d.exit_ip) || aceExitIp;
 		/* 只有在「刚连上」那一刻锚定起点，之后沿用本地推算，秒表不会来回跳 */
 		if (prev !== 'on' || !aceUpSince) {
@@ -906,6 +923,53 @@ function acePoll() {
 	x.open('GET', ACE_STATUS + '?t=' + Date.now(), true);
 	x.onload = function () {
 		try { aceRender(JSON.parse(x.responseText)); } catch (e) {}
+	};
+	x.send();
+}
+
+/* 出口健康叠加：只在连接态生效。把「已连接」按真实出口质量改写成
+   已连接·拥塞 / 已连接·无响应，并给状态点贴 warn/bad class。断开时还原。 */
+function aceHealthRender() {
+	var box = document.getElementById('dialState');
+	var tx = document.getElementById('dialStateText');
+	if (!box || !tx) return;
+	if (ringState !== 'on' || healthLevel === 'idle') {
+		/* 非连接态不叠加；文字交给 aceDialState / aceDialClock */
+		if (ringState !== 'on') {
+			box.classList.remove('warn', 'bad');
+			tx.textContent = ringState === 'off' ? '未连接'
+				: (ringState === 'connecting' ? '正在连接' : '正在断开');
+		}
+		return;
+	}
+	box.classList.remove('warn', 'bad');
+	if (healthLevel === 'warn' || healthLevel === 'bad') {
+		box.classList.add(healthLevel);
+		tx.textContent = healthLevel === 'bad' ? '已连接 · 出口无响应' : '已连接 · 出口拥塞';
+		/* 具体延迟写在秒表 sub 里（aceDialClock 每秒刷新），这里不碰 */
+	} else {
+		tx.textContent = '已连接';
+		/* 通畅时秒表文字由 aceDialClock 维护，这里不覆写 sub */
+	}
+}
+
+/* 健康探测低频轮询：后端自带 20s 缓存，这里 10s 拉一次即可。
+   失败时保持上一次判定，不误报成"恢复通畅"。 */
+function aceHealthPoll() {
+	if (document.hidden || ringState !== 'on') return;
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_HEALTH + '?t=' + Date.now(), true);
+	x.onload = function () {
+		try {
+			var d = JSON.parse(x.responseText);
+			if (!d || !d.level) return;
+			var changed = d.level !== healthLevel;
+			healthLevel = d.level;
+			healthState = d.state || '';
+			healthMs = d.ms || 0;
+			if (changed) aceHealthRender();
+			else if (healthLevel === 'warn' || healthLevel === 'bad') aceHealthRender();
+		} catch (e) {}
 	};
 	x.send();
 }
@@ -1346,16 +1410,19 @@ ringFit();
 requestAnimationFrame(ringDraw);
 aceDialState('off');
 acePoll();
+aceHealthPoll();
 aceLoadLog();
 aceLoadQuality();
 aceLoadMem();
 setInterval(acePoll, 2500);
+/* 出口健康：后端 20s 缓存，这里 10s 拉一次；只读取，不碰网络配置 */
+setInterval(aceHealthPoll, 10000);
 setInterval(aceLoadLog, 8000);
 /* 采样粒度是 30 分钟，质量图 60s 刷一次足够，不占 ubus 带宽 */
 setInterval(aceLoadQuality, 60000);
 setInterval(aceLoadMem, 60000);
 document.addEventListener('visibilitychange', function () {
-	if (!document.hidden) { acePoll(); aceLoadLog(); aceLoadQuality(); aceLoadMem(); }
+	if (!document.hidden) { acePoll(); aceHealthPoll(); aceLoadLog(); aceLoadQuality(); aceLoadMem(); }
 });
 </script>
 
