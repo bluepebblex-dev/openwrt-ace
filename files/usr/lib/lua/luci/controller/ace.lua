@@ -31,6 +31,7 @@ function index()
 	entry({"admin", "services", "ace", "api", "diagnose"}, call("api_diagnose")).leaf = true
 	entry({"admin", "services", "ace", "api", "probe"}, call("api_probe")).leaf = true
 	entry({"admin", "services", "ace", "api", "quality"}, call("api_quality")).leaf = true
+	entry({"admin", "services", "ace", "api", "mem"}, call("api_mem")).leaf = true
 	entry({"admin", "services", "ace", "api", "action"}, call("api_action")).leaf = true
 	entry({"admin", "services", "ace", "api", "log"}, call("api_log")).leaf = true
 	entry({"admin", "services", "ace", "api", "settings"}, call("api_settings")).leaf = true
@@ -643,6 +644,85 @@ function api_quality()
 	end
 	http.prepare_content("application/json")
 	http.write_json({ sites = sites, rows = rows, at = os.time() })
+end
+
+-- ACE 内存占用：只读 /proc 的 VmRSS + 自建 RRD 的 24h 历史。
+-- 采样由 /usr/bin/ace-mem-sample.sh 每分钟写 RRD，本接口不写任何文件，
+-- 也不碰连接 / 路由 / DNS。曲线压到约 96 点，够画一条平滑的 24h 走势。
+local ACE_MEM_RRD = "/opt/statistics-rrd/ace-mem.rrd"
+
+local function mem_rss_kb(pid)
+	local f = io.open("/proc/" .. pid .. "/status", "r")
+	if not f then return 0 end
+	local s = f:read("*a"); f:close()
+	return tonumber(s:match("VmRSS:%s+(%d+)%s+kB")) or 0
+end
+
+local function cmdline_of(pid)
+	local f = io.open("/proc/" .. pid .. "/cmdline", "rb")
+	if not f then return "" end
+	local s = f:read("*a") or ""; f:close()
+	return (s:gsub("%z", " "))
+end
+
+local function ace_mem_current()
+	local r = { core = 0, connect = 0, guard = 0 }
+	-- 直接遍历 /proc/*/comm：BusyBox pgrep -x 在这台机器上匹配不到 comm。
+	for pid in fs.dir("/proc") do
+		if pid:match("^%d+$") then
+			local f = io.open("/proc/" .. pid .. "/comm", "r")
+			local name = f and (f:read("*l") or "") or ""
+			if f then f:close() end
+			local c = cmdline_of(pid)
+			if name == "ace-engine" then
+				local key = c:find("guard", 1, true) and "guard"
+					or (c:find("connect", 1, true) and "connect" or nil)
+				if key then r[key] = r[key] + mem_rss_kb(pid) end
+			elseif name == "mihomo" and c:find("ace", 1, true) then
+				r.core = r.core + mem_rss_kb(pid)
+			end
+		end
+	end
+	r.current = r.core + r.connect + r.guard
+	return r
+end
+
+local function ace_mem_series()
+	local pts = {}
+	local p = io.popen("rrdtool fetch " .. ACE_MEM_RRD .. " AVERAGE --start -86400 2>/dev/null")
+	if not p then return pts end
+	for line in p:lines() do
+		local ts, v = line:match("(%d+):%s+([%d.eE+-]+)")
+		if ts and v and v ~= "nan" then
+			pts[#pts+1] = { tonumber(ts), tonumber(v) }
+		end
+	end
+	p:close()
+	if #pts <= 96 then return pts end
+	local out, step, i = {}, #pts / 96, 1
+	while i <= #pts do
+		out[#out+1] = pts[math.floor(i)]
+		i = i + step
+	end
+	-- 抽样可能跳过最后一个点，补上它，保证曲线尾巴是「现在」
+	if out[#out] ~= pts[#pts] then out[#out+1] = pts[#pts] end
+	return out
+end
+
+function api_mem()
+	local cur = ace_mem_current()
+	local mi = fs.readfile("/proc/meminfo") or ""
+	local total = tonumber(mi:match("MemTotal:%s+(%d+)")) or 0
+	http.prepare_content("application/json")
+	http.write_json({
+		current = cur.current,
+		core = cur.core,
+		connect = cur.connect,
+		guard = cur.guard,
+		total = total,
+		series = ace_mem_series(),
+		at = os.time()
+	})
 end
 
 function api_action()

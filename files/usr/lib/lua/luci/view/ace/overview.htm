@@ -107,6 +107,23 @@
 	}
 	.ace-card .k { font-size: 10.5px; opacity: .6; letter-spacing: .3px; }
 	.ace-card .v { font-size: 14.5px; font-weight: 600; margin-top: 2px; word-break: break-all; line-height: 1.3; }
+	/* 延迟热力条：绿(快)/橙(一般)/红(高)，宽度按延迟值映射，未连接时归零 */
+	.ace-lat-bar { height: 4px; border-radius: 3px; background: rgba(127,127,127,.22); margin-top: 7px; overflow: hidden; }
+	.ace-lat-bar i { display: block; height: 100%; width: 0; border-radius: 3px; transition: width .5s ease, background .5s ease; }
+	.ace-lat-bar i.fast { background: #3ddc84; }
+	.ace-lat-bar i.mid  { background: #ff6700; }
+	.ace-lat-bar i.slow { background: #e24b4a; }
+	/* ACE 内存曲线：只统计 ace-engine / mihomo，不把系统内存算进来 */
+	.ace-mem {
+		margin-top: 12px; padding: 14px 20px 12px; border-radius: 20px;
+		background: linear-gradient(180deg, #121216 0%, #0d0d10 100%);
+		border: 1px solid rgba(255,255,255,.08); color: #cfd3da;
+	}
+	.ace-mem-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+	.ace-mem-title { font-size: 14px; font-weight: 600; color: #e8eaee; }
+	.ace-mem-cur { font-size: 12px; color: #888; white-space: nowrap; }
+	.ace-mem svg { width: 100%; height: 96px; display: block; }
+	.ace-mem-parts { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 8px; font-size: 11.5px; color: #888; }
 
 	/* 流量面板（网络流量图） */
 	.ace-flow {
@@ -298,14 +315,31 @@
 			<div class="badge" id="cFlag">🌐</div>
 			<div><div class="k">国家/地区</div><div class="v" id="cCountry">—</div></div>
 		</div>
-		<div class="ace-card">
+		<div class="ace-card ace-latency-card">
 			<div class="badge">⏱</div>
-			<div><div class="k">延迟</div><div class="v" id="cLatency">—</div></div>
+			<div style="min-width:0;flex:1">
+				<div class="k">延迟</div><div class="v" id="cLatency">—</div>
+				<div class="ace-lat-bar"><i id="cLatBar"></i></div>
+			</div>
 		</div>
 		<div class="ace-card">
 			<div class="badge">🔌</div>
 			<div><div class="k">出口 IP</div><div class="v" id="cExit">—</div></div>
 		</div>
+	</div>
+
+	<div class="ace-mem">
+		<div class="ace-mem-head">
+			<span class="ace-mem-title">ACE 内存占用 · 最近 24 小时</span>
+			<span class="ace-mem-cur" id="memCur">读取中…</span>
+		</div>
+		<svg id="memChart" viewBox="0 0 800 96" preserveAspectRatio="none" role="img" aria-label="ACE 内存占用曲线">
+			<line x1="0" y1="28" x2="800" y2="28" stroke="rgba(127,127,127,.15)" stroke-width="1"/>
+			<line x1="0" y1="62" x2="800" y2="62" stroke="rgba(127,127,127,.15)" stroke-width="1"/>
+			<path id="memFill" d="" fill="rgba(255,103,0,.14)"/>
+			<path id="memLine" d="" fill="none" stroke="#ff6700" stroke-width="2" stroke-linejoin="round"/>
+		</svg>
+		<div class="ace-mem-parts" id="memParts">核心 — · guard — · connect —</div>
 	</div>
 
 	<div class="ace-probe">
@@ -395,6 +429,7 @@ var ACE_SAVE = '<%=url("admin/services/ace/api/save")%>';
 var ACE_DIAG = '<%=url("admin/services/ace/api/diagnose")%>';
 var ACE_PROBE = '<%=url("admin/services/ace/api/probe")%>';
 var ACE_QUALITY = '<%=url("admin/services/ace/api/quality")%>';
+var ACE_MEM = '<%=url("admin/services/ace/api/mem")%>';
 var ACE_TOKEN = '<%=context.authtoken or ""%>';
 var aceBusy = false;
 var aceLast = null;   /* 上一次 status（流量速率用总量差算） */
@@ -477,6 +512,9 @@ for (var ri = 0; ri < RING_N; ri++) {
 	RING_WAVE.push((ri / RING_N) * Math.PI * 4);
 }
 var aceExitIp = '', aceUpSince = 0;
+/* 绕环流光：连接态一个亮点沿内圈跑，代表数据正在流动。
+   角速度随实时速率变化（有流量转快、空闲转慢），纯视觉，不读不写任何状态。 */
+var RING_FLOW = [255, 103, 0], ringFlowAng = -Math.PI / 2, ringFlowLast = 0;
 
 function ringRgba(c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; }
 
@@ -586,6 +624,31 @@ function ringDraw(ts) {
 		ringCtx.strokeStyle = 'rgba(255,255,255,.06)';
 		ringCtx.lineWidth = 1.4;
 		ringCtx.beginPath(); ringCtx.arc(ringCX, ringCY, rr, 0, Math.PI * 2); ringCtx.stroke();
+	}
+
+	/* 绕环流光点：连接态沿内圈跑，速率越高转越快。空闲也慢转，表示链路是活的。 */
+	if (on) {
+		var dt = ringFlowLast ? Math.min(0.05, (ts - ringFlowLast) / 1000) : 0.016;
+		ringFlowLast = ts;
+		var lastDown = aceSparkDown.length ? aceSparkDown[aceSparkDown.length - 1] : 0;
+		var lastUp = aceSparkUp.length ? aceSparkUp[aceSparkUp.length - 1] : 0;
+		var flowRate = lastDown + lastUp;                       /* 字节/秒 */
+		var speed = 0.35 + Math.min(2.2, flowRate / 120000);    /* 弧度/秒：空闲慢、满载快 */
+		ringFlowAng = (ringFlowAng + dt * speed) % (Math.PI * 2);
+		var fx = ringCX + Math.cos(ringFlowAng) * rr, fy = ringCY + Math.sin(ringFlowAng) * rr;
+		ringCtx.save();
+		ringCtx.globalCompositeOperation = 'lighter';
+		var g = ringCtx.createRadialGradient(fx, fy, 0, fx, fy, 11);
+		g.addColorStop(0, 'rgba(255,103,0,.95)');
+		g.addColorStop(0.35, 'rgba(255,140,40,.42)');
+		g.addColorStop(1, 'rgba(255,103,0,0)');
+		ringCtx.fillStyle = g;
+		ringCtx.beginPath(); ringCtx.arc(fx, fy, 11, 0, Math.PI * 2); ringCtx.fill();
+		ringCtx.fillStyle = 'rgba(255,220,170,.95)';
+		ringCtx.beginPath(); ringCtx.arc(fx, fy, 2.3, 0, Math.PI * 2); ringCtx.fill();
+		ringCtx.restore();
+	} else {
+		ringFlowLast = ts;
 	}
 }
 
@@ -795,6 +858,13 @@ function aceRender(d) {
 		document.getElementById('cFlag').textContent = '🇨🇳';
 	}
 	document.getElementById('cLatency').textContent = d.latency ? (d.latency + ' ms') : '—';
+	/* 延迟热力条：<120ms 绿、120–350ms 橙、>350ms 红；宽度按 0–600ms 映射 */
+	var latBar = document.getElementById('cLatBar');
+	if (latBar) {
+		var lat = (d.connected && d.latency) ? d.latency : 0;
+		latBar.className = lat === 0 ? '' : (lat < 120 ? 'fast' : (lat <= 350 ? 'mid' : 'slow'));
+		latBar.style.width = Math.max(0, Math.min(100, lat / 600 * 100)) + '%';
+	}
 	document.getElementById('cExit').textContent = d.exit_ip || '—';
 
 	/* 当前链路卡片：承载端点 → 出口节点，一眼看清流量走的哪条路 */
@@ -989,6 +1059,49 @@ function aceProbe() {
 }
 
 /* ---- 24h 网络质量曲线：只读 diag.db，服务端已按 24h 过滤 ---- */
+/* ACE 内存曲线：数据来自只读 api/mem（/proc VmRSS + 自建 RRD），一分钟刷一次 */
+function aceFmtKb(kb) {
+	kb = Math.round(kb || 0);
+	return kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb + ' KB';
+}
+function aceDrawMem(series) {
+	if (!series || series.length < 2) return;
+	var w = 800, h = 96, n = series.length, max = 0;
+	for (var i = 0; i < n; i++) if (series[i][1] > max) max = series[i][1];
+	if (max <= 0) max = 1;
+	var pts = series.map(function (p, i) {
+		var x = i / (n - 1) * w;
+		var y = h - Math.min(1, p[1] / max) * (h - 12) - 6;
+		return x.toFixed(1) + ' ' + y.toFixed(1);
+	});
+	var d = 'M' + pts.join(' L');
+	document.getElementById('memLine').setAttribute('d', d);
+	document.getElementById('memFill').setAttribute('d', d + ' L' + w + ' ' + h + ' L0 ' + h + ' Z');
+}
+function aceLoadMem() {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_MEM + '?t=' + Date.now(), true);
+	x.timeout = 8000;
+	x.onload = function () {
+		var d = null;
+		try { d = JSON.parse(x.responseText); } catch (e) {}
+		if (!d || !d.series) return;
+		aceDrawMem(d.series);
+		var cur = document.getElementById('memCur');
+		if (d.current > 0) {
+			var pct = d.total > 0 ? (d.current / d.total * 100).toFixed(1) : '0.0';
+			cur.textContent = aceFmtKb(d.current) + ' · 占系统 ' + pct + '%';
+		} else {
+			cur.textContent = 'ACE 未运行';
+		}
+		var parts = '核心 ' + aceFmtKb(d.core) + ' · guard ' + aceFmtKb(d.guard) +
+			' · connect ' + aceFmtKb(d.connect);
+		document.getElementById('memParts').textContent =
+			d.series.length < 2 ? parts + '（历史采集中）' : parts;
+	};
+	x.send();
+}
+
 function aceLoadQuality() {
 	var x = new XMLHttpRequest();
 	x.open('GET', ACE_QUALITY + '?t=' + Date.now(), true);
@@ -1235,12 +1348,14 @@ aceDialState('off');
 acePoll();
 aceLoadLog();
 aceLoadQuality();
+aceLoadMem();
 setInterval(acePoll, 2500);
 setInterval(aceLoadLog, 8000);
 /* 采样粒度是 30 分钟，质量图 60s 刷一次足够，不占 ubus 带宽 */
 setInterval(aceLoadQuality, 60000);
+setInterval(aceLoadMem, 60000);
 document.addEventListener('visibilitychange', function () {
-	if (!document.hidden) { acePoll(); aceLoadLog(); aceLoadQuality(); }
+	if (!document.hidden) { acePoll(); aceLoadLog(); aceLoadQuality(); aceLoadMem(); }
 });
 </script>
 
