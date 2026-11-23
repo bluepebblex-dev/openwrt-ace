@@ -146,7 +146,7 @@
 
 		<div class="ace-row">
 			<div class="lbl">出口地区</div>
-			<div class="ctl"><select class="cbi-input-select" id="f-openvpn_region" style="min-width:220px"></select></div>
+			<div class="ctl"><select class="cbi-input-select" id="f-openvpn_region" style="min-width:360px"></select></div>
 			<p class="sub">留空按延迟自动挑。选了地区但没连上时，引擎会改用其他地区的节点并在日志里说明。</p>
 		</div>
 
@@ -283,15 +283,37 @@ var ACE_COUNTRIES = [
 	['HU', '🇭🇺 匈牙利'], ['BG', '🇧🇬 保加利亚']
 ];
 
-(function aceFillCountries() {
+/* 和首页同一套格式：序号 · 国旗+国家 · 该国最快延迟 · 🏠（有家宽节点）。
+   数据由 status API 顺带返回，只在签名变化时重绘并保留当前选择。 */
+var ACE_STATS = {};
+var ACE_STATS_SIG = '';
+function aceRenderRegions(stats) {
+	var sig = stats ? JSON.stringify(stats) : '';
+	if (sig === ACE_STATS_SIG) return;
+	ACE_STATS_SIG = sig;
+	ACE_STATS = stats || {};
 	var sel = document.getElementById('f-openvpn_region');
+	if (!sel) return;
+	var cur = sel.value;
+	sel.innerHTML = '';
 	for (var i = 0; i < ACE_COUNTRIES.length; i++) {
+		var code = ACE_COUNTRIES[i][0];
 		var o = document.createElement('option');
-		o.value = ACE_COUNTRIES[i][0];
-		o.textContent = ACE_COUNTRIES[i][1];
+		o.value = code;
+		if (!code) {
+			o.textContent = '00 · ' + ACE_COUNTRIES[i][1];
+		} else {
+			var st = ACE_STATS[code] || {};
+			/* est=VPN Gate 自报 ping：TUN 开着时本地实测延迟是假的，加 ~ 标明口径 */
+			var lat = st.lat > 0 ? (st.est ? '~' : '') + (st.lat >= 1000 ? (st.lat / 1000).toFixed(1) + 's' : st.lat + 'ms') : '—';
+			o.textContent = (i < 10 ? '0' + i : i) + ' · ' + ACE_COUNTRIES[i][1]
+				+ ' · ' + lat + (st.home ? ' · 🏠' : '');
+		}
 		sel.appendChild(o);
 	}
-})();
+	if (cur) sel.value = cur;
+}
+aceRenderRegions(null);
 
 function aceSetRegion(v) {
 	var sel = document.getElementById('f-openvpn_region');
@@ -312,6 +334,7 @@ function aceMsg(t, cls) {
 }
 
 function aceFill(d) {
+	aceRenderRegions(d.vpn_countries);
 	ACE_FLAGS.forEach(function (k) {
 		var el = document.getElementById('f-' + k);
 		if (el) el.checked = (d[k] === '1' || d[k] === 'true' || d[k] === 'on');
@@ -697,6 +720,16 @@ function aceVpnRender(d) {
 	return false;
 }
 
+/* 刷新节点后延迟会变：只取国家统计更新下拉，不碰用户正在编辑的其他字段 */
+function aceRegionStatsRefresh() {
+	var x = new XMLHttpRequest();
+	x.open('GET', ACE_STATUS + '?t=' + Date.now(), true);
+	x.onload = function () {
+		try { aceRenderRegions(JSON.parse(x.responseText).vpn_countries); } catch (e) {}
+	};
+	x.send();
+}
+
 function aceVpnPoll(times) {
 	var x = new XMLHttpRequest();
 	x.open('GET', ACE_VPN + '?t=' + Date.now(), true);
@@ -708,6 +741,7 @@ function aceVpnPoll(times) {
 			ACE_SAW_VPN = true;
 		} else if (ACE_SAW_VPN) {
 			ACE_SAW_VPN = false;
+			aceRegionStatsRefresh();
 			aceMsg(d.result && d.result.ok ? '节点列表已更新' : '节点刷新失败，详情见状态提示',
 				d.result && d.result.ok ? 'ok' : 'err');
 		}

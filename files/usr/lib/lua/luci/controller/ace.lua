@@ -159,12 +159,69 @@ local VPN_FLAG = "/var/run/ace-vpn-refreshing"
 local VPN_LOG = "/var/log/ace-vpn-refresh.log"
 local VPN_STAT = "/var/run/ace-vpn-stat.json"
 local VPN_CACHE = "/etc/ace/vpngate-nodes-v2.json"
+-- 出口下拉用的国家级汇总（最快延迟 / 是否有家宽节点）。api_status 每 2.5s
+-- 被轮询一次，不能直接解析 1MB 节点缓存；按缓存 mtime + 5 分钟 TTL 压成小 JSON。
+local VPN_COUNTRIES = "/var/run/ace-vpn-countries.json"
 -- probe 结果按 (path, size, mtime) 缓存：一次 probe 要跑八次 mihomo -t（约 3 秒），
 -- 而 api_status 每 2.5 秒被轮询一次，不缓存等于把 CPU 钉在配置解析上。
 local PROBE_CACHE = "/var/run/ace-probe.json"
 -- 缓存有效期。内核能力本身不会变，但 probe 顺带查的「官方最新版」会变，
 -- 6 小时重探一次足够，也不会让设置页每分钟跑一遍配置测试。
 local PROBE_TTL = 6 * 3600
+
+-- 出口国家下拉的辅助数据：每个国家的最快延迟（lat）和是否有家宽节点
+-- （home）。节点缓存约 1MB，轮询时不能反复解析，所以按源文件 mtime 命中
+-- 一份几百字节的汇总；刷新节点后 mtime 变了会自动重算。
+-- 延迟来源随 TUN 状态切换：ace0 存在时本机发起的 TCP 探测被 gvisor TUN
+-- 当场接受 SYN，latency_ms 全是 1–5ms 假值，必须用 VPN Gate 自报 ping_ms
+-- （est=true，前端加 ~ 标明）；TUN 没开时 latency_ms 才是真实握手时间。
+-- TUN 状态也进缓存键——刚连上/刚断开不能沿用 5 分钟前的旧口径。
+local function vpn_country_stats()
+	local st = fs.stat(VPN_CACHE)
+	if not st then return nil end
+	local src = tonumber(st.mtime) or 0
+	local tun_on = fs.access("/sys/class/net/ace0") and 1 or 0
+	local raw = fs.readfile(VPN_COUNTRIES)
+	if raw and raw ~= "" then
+		local ok, t = pcall(function() return require("luci.jsonc").parse(raw) end)
+		if ok and type(t) == "table" and type(t.countries) == "table"
+			and tonumber(t.src_mtime or 0) == src and tonumber(t.tun or 0) == tun_on
+			and (os.time() - (t.at or 0)) < 300 then
+			return t.countries
+		end
+	end
+	raw = fs.readfile(VPN_CACHE)
+	if not raw or raw == "" then return nil end
+	local ok, data = pcall(function() return require("luci.jsonc").parse(raw) end)
+	if not ok or type(data) ~= "table" or type(data.nodes) ~= "table" then return nil end
+	local out = {}
+	for _, n in ipairs(data.nodes) do
+		local cc = string.upper(tostring(n.country_short or n.cc or ""))
+		if #cc == 2 then
+			local e = out[cc] or { lat = 0, home = false, nodes = 0, est = false }
+			e.nodes = e.nodes + 1
+			local lat
+			if tun_on == 1 then
+				lat = tonumber(n.ping_ms or 0) or 0
+				if lat > 0 then e.est = true end
+			else
+				lat = tonumber(n.latency_ms or 0) or 0
+			end
+			if lat > 0 and (e.lat == 0 or lat < e.lat) then e.lat = lat end
+			if n.class == "residential" then e.home = true end
+			out[cc] = e
+		end
+	end
+	if not next(out) then return nil end
+	local parts = {}
+	for cc, e in pairs(out) do
+		parts[#parts + 1] = string.format('"%s":{"lat":%d,"home":%s,"nodes":%d,"est":%s}',
+			cc, e.lat, e.home and "true" or "false", e.nodes, e.est and "true" or "false")
+	end
+	fs.writefile(VPN_COUNTRIES, string.format('{"src_mtime":%d,"tun":%d,"at":%d,"countries":{%s}}',
+		src, tun_on, os.time(), table.concat(parts, ",")))
+	return out
+end
 
 -- 是否是一个可执行文件：返回字节数，不是就返回 nil。
 -- 不能用 st.mode 判断——这台 ImmortalWrt 的 nixio 精简编译里 stat().mode 是 nil
@@ -467,6 +524,9 @@ function api_status()
 			end
 		end
 	end
+
+	-- 出口下拉的国家统计（最快延迟 / 家宽标记），两处下拉共用这一份
+	out.vpn_countries = vpn_country_stats()
 
 	http.prepare_content("application/json")
 	http.write_json(out)
@@ -913,6 +973,7 @@ function api_settings()
 		out[k] = c:get("ace", "main", k) or ""
 	end
 	out.enabled = fs.access("/etc/rc.d/S99ace") and "1" or "0"
+	out.vpn_countries = vpn_country_stats()
 	http.prepare_content("application/json")
 	http.write_json(out)
 end

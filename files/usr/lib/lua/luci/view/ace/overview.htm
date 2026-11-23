@@ -18,12 +18,12 @@
 	.ace-picker {
 		display: flex; align-items: center; gap: 10px; padding: 11px 16px;
 		background: rgba(127,127,127,.10); border: 1px solid rgba(127,127,127,.18);
-		border-radius: 12px; min-width: 200px; flex: 0 1 auto;
+		border-radius: 12px; min-width: 280px; flex: 0 1 auto;
 	}
 	.ace-picker .ic { font-size: 15px; opacity: .8; }
 	.ace-picker select {
 		border: 0; background: transparent; color: inherit; font-size: 13.5px; font-weight: 600;
-		outline: none; max-width: 210px; cursor: pointer;
+		outline: none; max-width: 300px; cursor: pointer;
 	}
 	.ace-picker select option { color: #111; }
 	.ace-picker input {
@@ -461,15 +461,38 @@ var ACE_COUNTRIES = [
 	['BR', '🇧🇷 巴西'], ['ZA', '🇿🇦 南非'], ['AE', '🇦🇪 阿联酋']
 ];
 
-(function () {
+/* 出口下拉：序号 · 国旗+国家 · 该国最快延迟 · 🏠（有家宽节点）。
+   stats 由 status API 顺带送来；只在内容变化时重绘，免得 2.5s 一次的
+   轮询把用户正在操作的下拉重置。 */
+var ACE_STATS = {};
+var ACE_STATS_SIG = '';
+function aceRenderRegions(stats) {
+	var sig = stats ? JSON.stringify(stats) : '';
+	if (sig === ACE_STATS_SIG) return;
+	ACE_STATS_SIG = sig;
+	ACE_STATS = stats || {};
 	var sel = document.getElementById('f-region');
+	if (!sel) return;
+	var cur = sel.value;
+	sel.innerHTML = '';
 	for (var i = 0; i < ACE_COUNTRIES.length; i++) {
+		var code = ACE_COUNTRIES[i][0];
 		var o = document.createElement('option');
-		o.value = ACE_COUNTRIES[i][0];
-		o.textContent = ACE_COUNTRIES[i][1];
+		o.value = code;
+		if (!code) {
+			o.textContent = '00 · ' + ACE_COUNTRIES[i][1];
+		} else {
+			var st = ACE_STATS[code] || {};
+			/* est=VPN Gate 自报 ping：TUN 开着时本地实测延迟是假的，加 ~ 标明口径 */
+			var lat = st.lat > 0 ? (st.est ? '~' : '') + (st.lat >= 1000 ? (st.lat / 1000).toFixed(1) + 's' : st.lat + 'ms') : '—';
+			o.textContent = (i < 10 ? '0' + i : i) + ' · ' + ACE_COUNTRIES[i][1]
+				+ ' · ' + lat + (st.home ? ' · 🏠' : '');
+		}
 		sel.appendChild(o);
 	}
-})();
+	if (cur) sel.value = cur;
+}
+aceRenderRegions(null);
 
 function aceFlag(iso) {
 	if (!iso || iso.length !== 2) return '🌐';
@@ -799,6 +822,7 @@ function aceDrawFlow() {
 }
 
 function aceRender(d) {
+	aceRenderRegions(d.vpn_countries);
 	/* 内核缺失时连接一定失败——把原因和入口摆在按钮上面，别让人看日志猜。
 	   OpenVPN 出口还多一种失败：内核存在但太旧，没有 openvpn 出站。 */
 	var warn = document.getElementById('coreWarn');
